@@ -107,14 +107,14 @@ def deepgemm_fp8_gemm(
     # Determine output dtype FIRST, before creating tensor
     if out_dtype is None:
         # Determine if this is an accumulation operation that needs 1D1D kernel
-        # 1D1D kernel (accumulation): Use when we have actual accumulation to do inside DeepGEMM
+        # 1D1D kernel (accumulation): Use when we have accumulate=True
         # 1D2D kernel (no accumulation): Use for simple forward pass operations
-        needs_accumulation_in_kernel = (accumulate and bias is not None)
+        needs_accumulation_in_kernel = accumulate
 
         print(f"DEBUG: accumulate={accumulate}, bias={bias is not None}, needs_accumulation_in_kernel={needs_accumulation_in_kernel}")
 
         if needs_accumulation_in_kernel:
-            # 1D1D kernel: accumulation inside DeepGEMM, requires float32 output
+            # 1D1D kernel: in-place accumulation, requires float32 output
             out_dtype = torch.float32
             print(f"DEBUG: Using 1D1D kernel with float32 output")
         else:
@@ -131,23 +131,31 @@ def deepgemm_fp8_gemm(
     # Create output tensor with correct dtype AFTER determining out_dtype
     if out is None:
         out = torch.empty(out_shape, dtype=out_dtype, device=A.device)
+        print(f"DEBUG: Created output tensor with dtype {out.dtype}")
     elif out.dtype != out_dtype:
         # If pre-allocated tensor has wrong dtype, convert it
         out = out.to(out_dtype)
+        print(f"DEBUG: Converted output tensor to dtype {out.dtype}")
+    else:
+        print(f"DEBUG: Using pre-allocated output tensor with dtype {out.dtype}")
 
     # Prepare bias handling FIRST (needed for kernel selection)
-    needs_accumulation_in_kernel = (accumulate and bias is not None)
+    # For 1D1D kernel (in-place accumulation): accumulate=True means we accumulate into output
+    # The c_tensor should be the output tensor itself for in-place accumulation
+    needs_accumulation_in_kernel = accumulate
 
     if needs_accumulation_in_kernel:
-        # 1D1D kernel: pass bias directly to DeepGEMM for accumulation
-        c_tensor = bias
-        if out.shape != bias.shape:
-            # Broadcast bias if needed
-            c_tensor = bias.expand(out.shape).contiguous()
-        # DeepGEMM 1D1D requires c_tensor to be float32
-        if c_tensor.dtype != torch.float32:
-            c_tensor = c_tensor.to(torch.float32)
-        bias_to_add_later = None  # Don't add bias later, it's handled in DeepGEMM
+        # 1D1D kernel: pass output tensor as c_tensor for in-place accumulation
+        # Pre-initialize output with bias if provided
+        if bias is not None:
+            if out.shape != bias.shape:
+                # Broadcast bias if needed
+                bias_broadcasted = bias.expand(out.shape)
+                out.copy_(bias_broadcasted)
+            else:
+                out.copy_(bias)
+        c_tensor = out  # Use output tensor for in-place accumulation
+        bias_to_add_later = None  # Don't add bias later, it's already in the output
     else:
         # 1D2D kernel: add bias after DeepGEMM operation
         c_tensor = None  # Pass None to DeepGEMM 1D2D kernel

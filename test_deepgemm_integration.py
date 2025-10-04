@@ -100,7 +100,13 @@ def test_deepgemm_integration():
                     "expected_kernel": "1D2D"
                 },
                 {
-                    "name": "Accumulation GEMM (bias + accumulate)",
+                    "name": "Accumulation GEMM (accumulate only)",
+                    "kwargs": {"layout": "nt", "accumulate": True},
+                    "expected_dtype": torch.float32,  # This should use 1D1D kernel
+                    "expected_kernel": "1D1D"
+                },
+                {
+                    "name": "Accumulation GEMM (with bias + accumulate)",
                     "kwargs": {"layout": "nt", "bias": torch.randn(M, N, device=device, dtype=torch.bfloat16), "accumulate": True},
                     "expected_dtype": torch.float32,  # This should use 1D1D kernel
                     "expected_kernel": "1D1D"
