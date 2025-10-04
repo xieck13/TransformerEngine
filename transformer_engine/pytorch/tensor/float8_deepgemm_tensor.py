@@ -97,9 +97,9 @@ class FP8DeepGemmQuantizer(Float8BlockQuantizer):
     def get_scale_shape(self, shape: Iterable[int], columnwise: bool) -> Tuple[int, int]:
         """Calculate the shape of the scaling tensor for DeepGEMM-compatible quantization.
 
-        This method matches the exact scale shapes produced by DeepGEMM's utilities:
-        - per_token_cast_to_fp8 produces scales with shape [M, 1] for input [M, K]
-        - per_block_cast_to_fp8 produces scales with shape [blocks_M, blocks_K] for input [M, K]
+        Based on actual DeepGEMM utility behavior:
+        - per_token_cast_to_fp8 produces scales with shape [M, ceil(K/128)] for input [M, K]
+        - per_block_cast_to_fp8 produces scales with shape [ceil(M/128), ceil(K/128)] for input [M, K]
 
         Parameters
         ----------
@@ -123,15 +123,18 @@ class FP8DeepGemmQuantizer(Float8BlockQuantizer):
 
         M, K = shape_list[-2], shape_list[-1]
 
+        # DeepGEMM uses 128 as block size for scale calculations
+        block_size = 128
+
         if columnwise:
-            # per_block_cast_to_fp8: returns [ceil(M/128), ceil(K/128)] for [M, K] input
-            block_size = 128  # DeepGEMM block size
+            # per_block_cast_to_fp8: [ceil(M/128), ceil(K/128)] for [M, K] input
             blocks_M = math.ceil(M / block_size)
             blocks_K = math.ceil(K / block_size)
             return (blocks_M, blocks_K)
         else:
-            # per_token_cast_to_fp8: returns [M, 1] for [M, K] input
-            return (M, 1)
+            # per_token_cast_to_fp8: [M, ceil(K/128)] for [M, K] input
+            blocks_K = math.ceil(K / block_size)
+            return (M, blocks_K)
 
     def make_empty(
         self,

@@ -44,23 +44,31 @@ def debug_deepgemm_scales():
             print(f"  Scales dims: {fp8_scales_block.dim()}")
 
             # Test with transposed tensor (for B in NT layout)
-            test_tensor_T = torch.randn(K, M, device=device, dtype=torch.bfloat16)
-            print(f"\nTransposed tensor shape: {test_tensor_T.shape}")
+            # Note: per_token_cast_to_fp8 requires K dimension to be multiple of 128
+            if M % 128 == 0:  # Only test if dimension is compatible
+                test_tensor_T = torch.randn(K, M, device=device, dtype=torch.bfloat16)
+                print(f"\nTransposed tensor shape: {test_tensor_T.shape}")
 
-            fp8_data_T, fp8_scales_T = per_token_cast_to_fp8(test_tensor_T, use_ue8m0=False)
-            print(f"per_token_cast_to_fp8 (transposed):")
-            print(f"  Data shape: {fp8_data_T.shape}")
-            print(f"  Scales shape: {fp8_scales_T.shape}")
+                try:
+                    fp8_data_T, fp8_scales_T = per_token_cast_to_fp8(test_tensor_T, use_ue8m0=False)
+                    print(f"per_token_cast_to_fp8 (transposed):")
+                    print(f"  Data shape: {fp8_data_T.shape}")
+                    print(f"  Scales shape: {fp8_scales_T.shape}")
+                except AssertionError as e:
+                    print(f"per_token_cast_to_fp8 (transposed): Assertion error - {e}")
 
-            fp8_data_block_T, fp8_scales_block_T = per_block_cast_to_fp8(test_tensor_T, use_ue8m0=False)
-            print(f"per_block_cast_to_fp8 (transposed):")
-            print(f"  Data shape: {fp8_data_block_T.shape}")
-            print(f"  Scales shape: {fp8_scales_block_T.shape}")
+                fp8_data_block_T, fp8_scales_block_T = per_block_cast_to_fp8(test_tensor_T, use_ue8m0=False)
+                print(f"per_block_cast_to_fp8 (transposed):")
+                print(f"  Data shape: {fp8_data_block_T.shape}")
+                print(f"  Scales shape: {fp8_scales_block_T.shape}")
+            else:
+                print(f"\nSkipping transposed test for M={M} (not multiple of 128)")
 
         print("\n" + "=" * 50)
         print("Key Observations:")
-        print("- per_token_cast_to_fp8 produces scales with shape [M, 1] for input [M, K]")
-        print("- per_block_cast_to_fp8 produces scales with shape [blocks_M, blocks_K] for input [M, K]")
+        print("- per_token_cast_to_fp8 produces scales with shape [M, ceil(K/128)] for input [M, K]")
+        print("- per_block_cast_to_fp8 produces scales with shape [ceil(M/128), ceil(K/128)] for input [M, K]")
+        print("- per_token_cast_to_fp8 requires K dimension to be multiple of 128")
         print("- For NT layout: A[M,K] uses per_token, B[K,N] uses per_block")
 
     except Exception as e:
