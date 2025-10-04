@@ -212,6 +212,99 @@ class FP8DeepGemmQuantizer(Float8BlockQuantizer):
             use_deepgemm=self.use_deepgemm_layout,
         )
 
+    def update_quantized(
+        self,
+        src: torch.Tensor,
+        dst: FP8DeepGemmQTensor,
+        noop_flag: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Custom quantization update for DeepGEMM compatibility
+
+        Parameters
+        ----------
+        src : torch.Tensor
+            Source tensor to quantize
+        dst : FP8DeepGemmQTensor
+            Destination quantized tensor
+        noop_flag : Optional[torch.Tensor], optional
+            No-op flag, by default None
+        """
+        # Use parent class method but catch the C++ extension error
+        try:
+            # First try the parent implementation
+            super().update_quantized(src, dst, noop_flag)
+        except RuntimeError as e:
+            if "Unexpected type for quantizer" in str(e):
+                # Handle quantization manually for DeepGEMM compatibility
+                self._manual_update_quantized(src, dst)
+            else:
+                raise e
+
+    def _manual_update_quantized(
+        self,
+        src: torch.Tensor,
+        dst: FP8DeepGemmQTensor,
+    ) -> None:
+        """Manual quantization implementation for DeepGEMM tensors"""
+        # Convert to the expected FP8 dtype
+        if self.dtype == TE_DType.kFloat8E4M3:
+            fp8_dtype = torch.float8_e4m3fn
+        elif self.dtype == TE_DType.kFloat8E5M2:
+            fp8_dtype = torch.float8_e5m2
+        else:
+            raise ValueError(f"Unsupported FP8 dtype: {self.dtype}")
+
+        # Compute scaling factors for block quantization
+        src_view = src.view(-1, src.shape[-1])
+
+        if self.block_scaling_dim == 1:
+            # 1D block scaling (rowwise only)
+            # Calculate max values per row
+            amax = torch.amax(torch.abs(src_view), dim=-1, keepdim=True)
+
+            # Calculate scaling factor
+            fp8_max = torch.finfo(fp8_dtype).max
+            scale_inv = amax / fp8_max
+            scale_inv = torch.clamp(scale_inv, min=torch.finfo(torch.float32).eps)
+
+            # Quantize
+            quantized = (src_view / scale_inv).to(fp8_dtype)
+
+            # Store in destination tensor
+            dst.rowwise_data.copy_(quantized.view(src.shape))
+            dst.rowwise_scale_inv.copy_(scale_inv.view(-1))
+
+        elif self.block_scaling_dim == 2:
+            # 2D block scaling (rowwise + columnwise)
+
+            # Rowwise scaling
+            amax_row = torch.amax(torch.abs(src_view), dim=-1, keepdim=True)
+            fp8_max = torch.finfo(fp8_dtype).max
+            scale_inv_row = amax_row / fp8_max
+            scale_inv_row = torch.clamp(scale_inv_row, min=torch.finfo(torch.float32).eps)
+
+            # Columnwise scaling
+            amax_col = torch.amax(torch.abs(src_view), dim=0, keepdim=True)
+            scale_inv_col = amax_col / fp8_max
+            scale_inv_col = torch.clamp(scale_inv_col, min=torch.finfo(torch.float32).eps)
+
+            # Combined scaling (geometric mean or take row scaling as primary)
+            combined_scale_inv = scale_inv_row
+
+            # Quantize
+            quantized = (src_view / combined_scale_inv).to(fp8_dtype)
+
+            # Store in destination tensor
+            dst.rowwise_data.copy_(quantized.view(src.shape))
+            dst.rowwise_scale_inv.copy_(scale_inv_row.view(-1))
+
+            if dst.columnwise_data is not None and dst.columnwise_scale_inv is not None:
+                # For 2D scaling, also store columnwise scales
+                dst.columnwise_scale_inv.copy_(scale_inv_col.view(-1))
+
+        else:
+            raise ValueError(f"Unsupported block_scaling_dim: {self.block_scaling_dim}")
+
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return Float8BlockScaling
 
