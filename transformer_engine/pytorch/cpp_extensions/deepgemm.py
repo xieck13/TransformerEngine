@@ -132,21 +132,36 @@ def deepgemm_fp8_gemm(
 
     # Transform scaling factors to DeepGEMM format
     try:
-        A_scales_transformed = deep_gemm.transform_sf_into_required_layout(A_scales)
-        B_scales_transformed = deep_gemm.transform_sf_into_required_layout(B_scales)
+        # Get tensor dimensions
+        M, K = A_data.shape[-2:]
+        _, N = B_data.shape[-2:]
+
+        # Create recipe (assuming standard blockwise scaling)
+        recipe = torch.tensor([1, 1], dtype=torch.int, device=A_data.device)  # [row_block, col_block]
+
+        A_scales_transformed = deep_gemm.transform_sf_into_required_layout(
+            A_scales, mn=M, k=K, recipe=recipe
+        )
+        B_scales_transformed = deep_gemm.transform_sf_into_required_layout(
+            B_scales, mn=N, k=K, recipe=recipe
+        )
     except Exception as e:
         warnings.warn(f"Failed to transform scaling factors: {e}")
         from ..cpp_extensions.gemm import general_gemm
+
+        # Remove out_dtype from kwargs if it exists to avoid duplicate argument
+        kwargs_filtered = {k: v for k, v in kwargs.items() if k != 'out_dtype'}
+
         return general_gemm(
             A, B, workspace,
             out_dtype=out_dtype,
-            layout=layout,
+            layout=layout.upper(),  # Convert to uppercase for general_gemm
             out=out,
             bias=bias,
             accumulate=accumulate,
             alpha=alpha,
             beta=beta,
-            **kwargs
+            **kwargs_filtered
         )
 
     # Prepare bias handling
@@ -334,8 +349,19 @@ def deepgemm_fp8_grouped_gemm(
 
     try:
         # Transform scaling factors to DeepGEMM format
-        A_scales_transformed = deep_gemm.transform_sf_into_required_layout(A_scales)
-        B_scales_transformed = deep_gemm.transform_sf_into_required_layout(B_scales)
+        # Get tensor dimensions
+        total_M, K = A_data.shape[-2:]
+        _, N = B_data.shape[-2:]
+
+        # Create recipe (assuming standard blockwise scaling)
+        recipe = torch.tensor([1, 1], dtype=torch.int, device=A_data.device)
+
+        A_scales_transformed = deep_gemm.transform_sf_into_required_layout(
+            A_scales, mn=total_M, k=K, recipe=recipe
+        )
+        B_scales_transformed = deep_gemm.transform_sf_into_required_layout(
+            B_scales, mn=N, k=K, recipe=recipe
+        )
 
         # Call appropriate DeepGEMM grouped kernel
         if layout == "nt":
@@ -362,11 +388,15 @@ def deepgemm_fp8_grouped_gemm(
     except Exception as e:
         warnings.warn(f"DeepGEMM grouped operation failed: {e}. Falling back to regular grouped GEMM.")
         from ..cpp_extensions.gemm import general_grouped_gemm
+
+        # Remove out_dtype from kwargs if it exists to avoid duplicate argument
+        kwargs_filtered = {k: v for k, v in kwargs.items() if k != 'out_dtype'}
+
         return general_grouped_gemm(
             A, B, workspace, m_splits,
             out_dtype=out_dtype,
-            layout=layout,
+            layout=layout.upper(),  # Convert to uppercase for general_grouped_gemm
             out=out,
             bias=bias,
-            **kwargs
+            **kwargs_filtered
         )

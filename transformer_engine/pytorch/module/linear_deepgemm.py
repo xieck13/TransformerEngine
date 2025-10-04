@@ -195,7 +195,8 @@ class LinearDeepGemm(TransformerEngineBaseModule):
                 )
             except Exception as e:
                 # Fall back to regular matmul if DeepGEMM fails
-                output = torch.matmul(quantized_input.dequantize(), quantized_weight.dequantize())
+                # For NT layout: input @ weight.T
+                output = torch.matmul(quantized_input.dequantize(), quantized_weight.dequantize().T)
                 if self.bias is not None:
                     output = output + self.bias
         else:
