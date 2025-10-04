@@ -261,53 +261,90 @@ class FP8DeepGemmQuantizer(Float8BlockQuantizer):
         else:
             raise ValueError(f"Unsupported FP8 dtype: {self.dtype}")
 
-        # Compute scaling factors for block quantization
-        src_view = src.view(-1, src.shape[-1])
+        # Get tensor dimensions
+        M, K = 1, 1
+        for i in range(len(src.shape) - 1):
+            M *= src.shape[i]
+        if len(src.shape) > 0:
+            K = src.shape[-1]
+
+        # Reshape to 2D for block quantization
+        src_view = src.view(M, K)
+
+        # Calculate block dimensions
+        block_len = self.block_len
+        num_row_blocks = math.ceil(M / block_len)
+        num_col_blocks = math.ceil(K / block_len)
+
+        # Pad tensor to be divisible by block_len
+        M_padded = num_row_blocks * block_len
+        K_padded = num_col_blocks * block_len
+
+        if M_padded != M or K_padded != K:
+            padded_src = torch.zeros(M_padded, K_padded, dtype=src.dtype, device=src.device)
+            padded_src[:M, :K] = src_view
+            src_view = padded_src
 
         if self.block_scaling_dim == 1:
-            # 1D block scaling (rowwise only)
-            # Calculate max values per row
-            amax = torch.amax(torch.abs(src_view), dim=-1, keepdim=True)
+            # 1D block scaling (rowwise blocks)
+            # Reshape into blocks of size [num_row_blocks, block_len, K]
+            blocked_src = src_view.view(num_row_blocks, block_len, K)
+
+            # Calculate max value per block
+            amax = torch.amax(torch.abs(blocked_src), dim=(1, 2), keepdim=True)  # [num_row_blocks, 1, 1]
 
             # Calculate scaling factor
             fp8_max = torch.finfo(fp8_dtype).max
             scale_inv = amax / fp8_max
             scale_inv = torch.clamp(scale_inv, min=torch.finfo(torch.float32).eps)
 
-            # Quantize
-            quantized = (src_view / scale_inv).to(fp8_dtype)
+            # Expand scale_inv to match blocked shape for quantization
+            scale_inv_expanded = scale_inv.expand(-1, block_len, K)  # [num_row_blocks, block_len, K]
 
-            # Store in destination tensor (use private attributes)
-            dst._rowwise_data.copy_(quantized.view(src.shape))
-            dst._rowwise_scale_inv.copy_(scale_inv.view(-1))
+            # Quantize
+            quantized_blocks = (blocked_src / scale_inv_expanded).to(fp8_dtype)
+            quantized = quantized_blocks.view(M_padded, K_padded)
+
+            # Truncate back to original size and store
+            dst._rowwise_data.copy_(quantized[:M, :K].view(src.shape))
+            dst._rowwise_scale_inv.copy_(scale_inv.view(num_row_blocks, 1).squeeze(-1))
 
         elif self.block_scaling_dim == 2:
-            # 2D block scaling (rowwise + columnwise)
+            # 2D block scaling (rowwise + columnwise blocks)
+            # Reshape into 2D blocks [num_row_blocks, num_col_blocks, block_len, block_len]
+            blocked_src = src_view.view(num_row_blocks, block_len, num_col_blocks, block_len)
+            blocked_src = blocked_src.permute(0, 2, 1, 3)  # [num_row_blocks, num_col_blocks, block_len, block_len]
 
-            # Rowwise scaling
-            amax_row = torch.amax(torch.abs(src_view), dim=-1, keepdim=True)
+            # Calculate max value per 2D block
+            amax = torch.amax(torch.abs(blocked_src), dim=(2, 3), keepdim=True)  # [num_row_blocks, num_col_blocks, 1, 1]
+
+            # Calculate scaling factor
             fp8_max = torch.finfo(fp8_dtype).max
-            scale_inv_row = amax_row / fp8_max
-            scale_inv_row = torch.clamp(scale_inv_row, min=torch.finfo(torch.float32).eps)
+            scale_inv = amax / fp8_max
+            scale_inv = torch.clamp(scale_inv, min=torch.finfo(torch.float32).eps)
 
-            # Columnwise scaling
-            amax_col = torch.amax(torch.abs(src_view), dim=0, keepdim=True)
-            scale_inv_col = amax_col / fp8_max
-            scale_inv_col = torch.clamp(scale_inv_col, min=torch.finfo(torch.float32).eps)
-
-            # Combined scaling (geometric mean or take row scaling as primary)
-            combined_scale_inv = scale_inv_row
+            # Expand scale_inv to match blocked shape for quantization
+            scale_inv_expanded = scale_inv.expand(-1, -1, block_len, block_len)
 
             # Quantize
-            quantized = (src_view / combined_scale_inv).to(fp8_dtype)
+            quantized_blocks = (blocked_src / scale_inv_expanded).to(fp8_dtype)
 
-            # Store in destination tensor (use private attributes)
-            dst._rowwise_data.copy_(quantized.view(src.shape))
-            dst._rowwise_scale_inv.copy_(scale_inv_row.view(-1))
+            # Reshape back to original format
+            quantized_blocks = quantized_blocks.permute(0, 2, 1, 3)  # [num_row_blocks, block_len, num_col_blocks, block_len]
+            quantized = quantized_blocks.contiguous().view(M_padded, K_padded)
+
+            # Truncate back to original size and store
+            dst._rowwise_data.copy_(quantized[:M, :K].view(src.shape))
+
+            # Store scaling factors
+            # For 2D scaling, we typically store rowwise scales primarily
+            rowwise_scales = torch.amax(scale_inv, dim=1)  # [num_row_blocks, 1]
+            dst._rowwise_scale_inv.copy_(rowwise_scales.squeeze(-1))
 
             if dst._columnwise_data is not None and dst._columnwise_scale_inv is not None:
-                # For 2D scaling, also store columnwise scales
-                dst._columnwise_scale_inv.copy_(scale_inv_col.view(-1))
+                # Store columnwise scales if available
+                columnwise_scales = torch.amax(scale_inv, dim=0)  # [num_col_blocks, 1]
+                dst._columnwise_scale_inv.copy_(columnwise_scales.squeeze(-1))
 
         else:
             raise ValueError(f"Unsupported block_scaling_dim: {self.block_scaling_dim}")
