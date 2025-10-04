@@ -15,12 +15,12 @@ import torch.nn.functional as F
 print("Checking TransformerEngine installation...")
 
 try:
+    import transformer_engine.pytorch  # This loads the compiled extension
     import transformer_engine_torch as tex
-    TE_DType = tex.DType
-    print("✓ transformer_engine_torch compiled extension found")
+    from transformer_engine_torch import DType as TE_DType
+    print("✓ TransformerEngine and tex extension loaded successfully")
 except ImportError as e:
-    print(f"✗ transformer_engine_torch not available: {e}")
-    print("TransformerEngine needs to be properly compiled and installed.")
+    print(f"✗ TransformerEngine not properly installed: {e}")
     print("Please run: pip install transformer-engine[pytorch] or build from source.")
     sys.exit(1)
 

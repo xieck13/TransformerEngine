@@ -26,20 +26,23 @@ def check_installation():
 
     # Check TransformerEngine compiled extension
     try:
+        import transformer_engine.pytorch  # This loads the compiled extension
+        print("✓ transformer_engine.pytorch loaded")
+
         import transformer_engine_torch as tex
         print(f"✓ transformer_engine_torch extension available")
         print(f"✓ TE version: {getattr(tex, '__version__', 'unknown')}")
 
         # Test basic functionality
         try:
-            dtype = tex.DType.kFloat8E4M3
+            from transformer_engine_torch import DType as TE_DType
+            dtype = TE_DType.kFloat8E4M3
             print(f"✓ FP8 dtype available: {dtype}")
         except Exception as e:
             print(f"! FP8 dtype issue: {e}")
 
     except ImportError as e:
-        print(f"✗ transformer_engine_torch not available: {e}")
-        print("TransformerEngine needs to be properly installed.")
+        print(f"✗ TransformerEngine not properly installed: {e}")
         print("Options:")
         print("1. pip install transformer-engine[pytorch]")
         print("2. Build from source with CUDA support")
