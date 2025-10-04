@@ -121,8 +121,12 @@ def deepgemm_fp8_gemm(
     def _get_fp8_data_and_scales(tensor: FP8DeepGemmQTensor, columnwise: bool = False):
         if columnwise and tensor._columnwise_data is not None:
             return tensor._columnwise_data, tensor._columnwise_scale_inv
+        elif not columnwise and tensor._rowwise_data is not None:
+            return tensor._rowwise_data, tensor._rowwise_scale_inv
         elif tensor._rowwise_data is not None:
             return tensor._rowwise_data, tensor._rowwise_scale_inv
+        elif tensor._columnwise_data is not None:
+            return tensor._columnwise_data, tensor._columnwise_scale_inv
         else:
             raise ValueError("No suitable FP8 data found in tensor")
 
@@ -339,8 +343,12 @@ def deepgemm_fp8_grouped_gemm(
     def _get_fp8_data_and_scales(tensor: FP8DeepGemmQTensor, columnwise: bool = False):
         if columnwise and tensor._columnwise_data is not None:
             return tensor._columnwise_data, tensor._columnwise_scale_inv
+        elif not columnwise and tensor._rowwise_data is not None:
+            return tensor._rowwise_data, tensor._rowwise_scale_inv
         elif tensor._rowwise_data is not None:
             return tensor._rowwise_data, tensor._rowwise_scale_inv
+        elif tensor._columnwise_data is not None:
+            return tensor._columnwise_data, tensor._columnwise_scale_inv
         else:
             raise ValueError("No suitable FP8 data found in tensor")
 
