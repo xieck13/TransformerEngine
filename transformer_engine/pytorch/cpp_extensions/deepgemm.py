@@ -106,9 +106,17 @@ def deepgemm_fp8_gemm(
 
     # Determine output dtype FIRST, before creating tensor
     if out_dtype is None:
-        # For forward pass, always use bfloat16 for efficiency
-        # DeepGEMM will handle the computation, and we'll add bias separately if needed
-        out_dtype = torch.bfloat16
+        # Determine if this is an accumulation operation that needs 1D1D kernel
+        # 1D1D kernel (accumulation): Use when we have actual accumulation to do inside DeepGEMM
+        # 1D2D kernel (no accumulation): Use for simple forward pass operations
+        needs_accumulation_in_kernel = (accumulate and bias is not None)
+
+        if needs_accumulation_in_kernel:
+            # 1D1D kernel: accumulation inside DeepGEMM, requires float32 output
+            out_dtype = torch.float32
+        else:
+            # 1D2D kernel: simple GEMM, uses bfloat16 output
+            out_dtype = torch.bfloat16
 
     # Calculate output shape
     if layout in ["nt", "nn"]:
@@ -124,9 +132,22 @@ def deepgemm_fp8_gemm(
         out = out.to(out_dtype)
 
     # Prepare bias handling FIRST (needed for kernel selection)
-    # For forward pass, we'll add bias AFTER DeepGEMM operation, not during
-    bias_to_add_later = bias  # Store original bias for later addition
-    c_tensor = None  # Never pass bias directly to DeepGEMM for forward pass
+    needs_accumulation_in_kernel = (accumulate and bias is not None)
+
+    if needs_accumulation_in_kernel:
+        # 1D1D kernel: pass bias directly to DeepGEMM for accumulation
+        c_tensor = bias
+        if out.shape != bias.shape:
+            # Broadcast bias if needed
+            c_tensor = bias.expand(out.shape).contiguous()
+        # DeepGEMM 1D1D requires c_tensor to be float32
+        if c_tensor.dtype != torch.float32:
+            c_tensor = c_tensor.to(torch.float32)
+        bias_to_add_later = None  # Don't add bias later, it's handled in DeepGEMM
+    else:
+        # 1D2D kernel: add bias after DeepGEMM operation
+        c_tensor = None  # Pass None to DeepGEMM 1D2D kernel
+        bias_to_add_later = bias  # Add bias later if provided
 
     # Prepare FP8 data and scaling factors
     def _get_fp8_data_and_scales(tensor: FP8DeepGemmQTensor, columnwise: bool = False):
@@ -143,12 +164,23 @@ def deepgemm_fp8_gemm(
 
     # Get FP8 data and scales
     try:
-        # A tensor always uses rowwise (per_token), B tensor selection depends on kernel type
+        # A tensor always uses rowwise (per_token)
         A_data, A_scales = _get_fp8_data_and_scales(A, columnwise=False)
 
-        # For B tensor, forward pass always uses per_block quantization (columnwise)
-        # since we're using 1D2D kernels for forward operations
-        B_data, B_scales = _get_fp8_data_and_scales(B, columnwise=True)
+        # B tensor quantization depends on kernel type:
+        # - 1D1D kernels (accumulation): need per_token quantization for B
+        # - 1D2D kernels (no accumulation): need per_block quantization for B
+        if needs_accumulation_in_kernel:
+            # 1D1D kernel: B should use per_token quantization (rowwise)
+            if B._rowwise_data is not None:
+                B_data, B_scales = B._rowwise_data, B._rowwise_scale_inv
+            else:
+                # Fallback to columnwise if rowwise not available
+                warnings.warn("B tensor not quantized with per_token for 1D1D kernel - may cause scale layout errors")
+                B_data, B_scales = _get_fp8_data_and_scales(B, columnwise=True)
+        else:
+            # 1D2D kernel: B uses per_block quantization (columnwise)
+            B_data, B_scales = _get_fp8_data_and_scales(B, columnwise=True)
 
         # Create DeepGEMM input tuples
         # DeepGEMM expects (data, scales) tuples directly
@@ -165,10 +197,16 @@ def deepgemm_fp8_gemm(
     # but DeepGEMM doesn't support this directly - we handle it with alpha/beta scaling
 
     try:
-        # For forward pass, always use 1D2D kernel (no accumulation in DeepGEMM)
+        # Choose the correct recipe based on operation type
         # Recipe format: (dim1, dim2, dim3) where dim2 controls kernel selection:
+        # - dim2 == 1: 1D1D kernel (supports accumulation, requires float32, c!=None)
         # - dim2 != 1: 1D2D kernel (no accumulation, requires bfloat16, c=None)
-        recipe = (1, 128, 128)  # Always use 1D2D kernel for forward pass
+        if needs_accumulation_in_kernel:
+            # Use 1D1D kernel for accumulation operations
+            recipe = (1, 1, 128)
+        else:
+            # Use 1D2D kernel for simple GEMM operations
+            recipe = (1, 128, 128)
 
         # Call appropriate DeepGEMM kernel using the correct (data, scales) tuple format
         if layout == "nt":
