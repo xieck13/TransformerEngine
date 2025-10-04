@@ -94,6 +94,28 @@ class FP8DeepGemmQuantizer(Float8BlockQuantizer):
         if use_deepgemm_layout and not DEEPGEMM_AVAILABLE:
             warnings.warn("DeepGEMM not available, falling back to regular layout")
 
+    def get_columnwise_shape(self, shape: Iterable[int]) -> Tuple[int, ...]:
+        """Calculate the shape of a tensor after columnwise quantization for DeepGEMM.
+
+        DeepGEMM uses the same layout as the original tensor (no transposition),
+        unlike the base class which does dimensional permutation.
+
+        Parameters
+        ----------
+        shape : Iterable[int]
+            Original shape of the tensor
+
+        Returns
+        -------
+        Tuple[int, ...]
+            Same shape as input (DeepGEMM doesn't use transposed layout)
+        """
+        if not self.use_deepgemm_layout:
+            return super().get_columnwise_shape(shape)
+
+        # DeepGEMM keeps the same shape - no transposition
+        return tuple(shape)
+
     def get_scale_shape(self, shape: Iterable[int], columnwise: bool) -> Tuple[int, int]:
         """Calculate the shape of the scaling tensor for DeepGEMM-compatible quantization.
 
