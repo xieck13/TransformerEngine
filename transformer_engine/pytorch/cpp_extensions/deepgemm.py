@@ -111,12 +111,16 @@ def deepgemm_fp8_gemm(
         # 1D2D kernel (no accumulation): Use for simple forward pass operations
         needs_accumulation_in_kernel = (accumulate and bias is not None)
 
+        print(f"DEBUG: accumulate={accumulate}, bias={bias is not None}, needs_accumulation_in_kernel={needs_accumulation_in_kernel}")
+
         if needs_accumulation_in_kernel:
             # 1D1D kernel: accumulation inside DeepGEMM, requires float32 output
             out_dtype = torch.float32
+            print(f"DEBUG: Using 1D1D kernel with float32 output")
         else:
             # 1D2D kernel: simple GEMM, uses bfloat16 output
             out_dtype = torch.bfloat16
+            print(f"DEBUG: Using 1D2D kernel with bfloat16 output")
 
     # Calculate output shape
     if layout in ["nt", "nn"]:
@@ -204,9 +208,11 @@ def deepgemm_fp8_gemm(
         if needs_accumulation_in_kernel:
             # Use 1D1D kernel for accumulation operations
             recipe = (1, 1, 128)
+            print(f"DEBUG: Selected 1D1D recipe {recipe}, c_tensor={c_tensor is not None}")
         else:
             # Use 1D2D kernel for simple GEMM operations
             recipe = (1, 128, 128)
+            print(f"DEBUG: Selected 1D2D recipe {recipe}, c_tensor={c_tensor is not None}")
 
         # Call appropriate DeepGEMM kernel using the correct (data, scales) tuple format
         if layout == "nt":
