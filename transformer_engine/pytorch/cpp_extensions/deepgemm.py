@@ -104,7 +104,7 @@ def deepgemm_fp8_gemm(
     if not devices_match(A.device, B.device):
         raise ValueError("Input tensors must be on the same device")
 
-    # Prepare output tensor
+    # Determine output dtype FIRST, before creating tensor
     if out_dtype is None:
         # DeepGEMM requirements from gemm.hpp:
         # - Without accumulation (c=None): can use bfloat16
@@ -112,17 +112,12 @@ def deepgemm_fp8_gemm(
         if bias is not None:
             # We have bias, so we'll pass c_tensor → need float32
             out_dtype = torch.float32
-            print(f"DEBUG: bias is not None, setting out_dtype=torch.float32")
         elif beta is not None:
             # Beta scaling typically needs float32 precision
             out_dtype = torch.float32
-            print(f"DEBUG: beta is not None, setting out_dtype=torch.float32")
         else:
             # No bias, no beta → can use efficient bfloat16
             out_dtype = torch.bfloat16
-            print(f"DEBUG: no bias, no beta, setting out_dtype=torch.bfloat16")
-
-    print(f"DEBUG: Final out_dtype: {out_dtype}")
 
     # Calculate output shape
     if layout in ["nt", "nn"]:
@@ -130,8 +125,12 @@ def deepgemm_fp8_gemm(
     else:  # "tn", "tt"
         out_shape = list(A.shape[:-2]) + [A.shape[-1]] + [B.shape[-2] if layout == "tt" else B.shape[-1]]
 
+    # Create output tensor with correct dtype AFTER determining out_dtype
     if out is None:
         out = torch.empty(out_shape, dtype=out_dtype, device=A.device)
+    elif out.dtype != out_dtype:
+        # If pre-allocated tensor has wrong dtype, convert it
+        out = out.to(out_dtype)
 
     # Prepare FP8 data and scaling factors
     def _get_fp8_data_and_scales(tensor: FP8DeepGemmQTensor, columnwise: bool = False):
@@ -179,28 +178,31 @@ def deepgemm_fp8_gemm(
     # Prepare bias handling
     c_tensor = None
     if bias is not None:
-        print(f"DEBUG: Processing bias: {bias.shape}, {bias.dtype}")
         # Only pass c_tensor when we have an actual bias to add
         if out.shape != bias.shape:
             # Broadcast bias if needed
             c_tensor = bias.expand(out.shape).contiguous()
-            print(f"DEBUG: Broadcasted bias to: {c_tensor.shape}")
         else:
             c_tensor = bias
         # DeepGEMM requires c_tensor to be float32 when accumulating
         if c_tensor.dtype != torch.float32:
             c_tensor = c_tensor.to(torch.float32)
-            print(f"DEBUG: Converted c_tensor to float32: {c_tensor.dtype}")
-        print(f"DEBUG: Final c_tensor: {c_tensor.shape}, {c_tensor.dtype}")
-    else:
-        print(f"DEBUG: No bias, c_tensor = None")
-
-    print(f"DEBUG: About to call DeepGEMM with out.dtype={out.dtype}, c_tensor={c_tensor is not None}")
 
     # Note: accumulate=True without bias means accumulate into output tensor,
     # but DeepGEMM doesn't support this directly - we handle it with alpha/beta scaling
 
     try:
+        # Determine the correct recipe based on whether we need accumulation
+        # Recipe format: (dim1, dim2, dim3) where dim2 controls kernel selection:
+        # - dim2 == 1: 1D1D kernel (supports accumulation, requires float32)
+        # - dim2 != 1: 1D2D kernel (no accumulation, requires bfloat16)
+        if c_tensor is not None:
+            # Need accumulation → use 1D1D kernel
+            recipe = (1, 1, 128)
+        else:
+            # No accumulation → use 1D2D kernel
+            recipe = (1, 128, 128)
+
         # Call appropriate DeepGEMM kernel using the correct (data, scales) tuple format
         if layout == "nt":
             deep_gemm.fp8_gemm_nt(
@@ -209,7 +211,7 @@ def deepgemm_fp8_gemm(
                 out,
                 c=c_tensor,
                 disable_ue8m0_cast=True,
-                recipe=None
+                recipe=recipe
             )
         elif layout == "nn":
             deep_gemm.fp8_gemm_nn(
@@ -218,7 +220,7 @@ def deepgemm_fp8_gemm(
                 out,
                 c=c_tensor,
                 disable_ue8m0_cast=True,
-                recipe=None
+                recipe=recipe
             )
         elif layout == "tn":
             deep_gemm.fp8_gemm_tn(
@@ -227,7 +229,7 @@ def deepgemm_fp8_gemm(
                 out,
                 c=c_tensor,
                 disable_ue8m0_cast=True,
-                recipe=None
+                recipe=recipe
             )
         elif layout == "tt":
             deep_gemm.fp8_gemm_tt(
@@ -236,7 +238,7 @@ def deepgemm_fp8_gemm(
                 out,
                 c=c_tensor,
                 disable_ue8m0_cast=True,
-                recipe=None
+                recipe=recipe
             )
         else:
             raise ValueError(f"Unsupported layout: {layout}")
