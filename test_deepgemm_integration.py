@@ -39,13 +39,17 @@ def test_deepgemm_integration():
             return False
 
         # Create quantizers
+        # A quantizer: only needs rowwise (per_token) quantization
         A_quantizer = FP8DeepGemmQuantizer(
             fp8_dtype=TE_DType.kFloat8E4M3,
             rowwise=True, columnwise=False, use_deepgemm_layout=True
         )
+
+        # B quantizer: needs both rowwise and columnwise for kernel flexibility
+        # This allows DeepGEMM to choose per_token (rowwise) for 1D1D or per_block (columnwise) for 1D2D
         B_quantizer = FP8DeepGemmQuantizer(
             fp8_dtype=TE_DType.kFloat8E4M3,
-            rowwise=False, columnwise=True, use_deepgemm_layout=True
+            rowwise=True, columnwise=True, use_deepgemm_layout=True  # Both enabled
         )
         print("✓ FP8DeepGemmQuantizers created")
 

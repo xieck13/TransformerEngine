@@ -280,7 +280,11 @@ class FP8DeepGemmQuantizer(Float8BlockQuantizer):
                     # If shapes are incompatible, try to reshape or use fallback
                     dst._rowwise_scale_inv.fill_(fp8_scales.mean().item())
 
-            # Use per_block quantization for columnwise data
+            # For columnwise data, choice depends on intended kernel type:
+            # - 1D1D kernels (accumulation): use per_token_cast_to_fp8 for both A and B
+            # - 1D2D kernels (no accumulation): use per_block_cast_to_fp8 for B
+            # Since we don't know the kernel type here, we'll use per_block_cast_to_fp8
+            # and let the GEMM function handle any necessary adjustments
             if dst._columnwise_data is not None:
                 fp8_data, fp8_scales = per_block_cast_to_fp8(src, use_ue8m0=False)
                 dst._columnwise_data.copy_(fp8_data)
