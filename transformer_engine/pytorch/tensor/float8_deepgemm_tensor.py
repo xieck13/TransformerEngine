@@ -277,9 +277,9 @@ class FP8DeepGemmQuantizer(Float8BlockQuantizer):
             # Quantize
             quantized = (src_view / scale_inv).to(fp8_dtype)
 
-            # Store in destination tensor
-            dst.rowwise_data.copy_(quantized.view(src.shape))
-            dst.rowwise_scale_inv.copy_(scale_inv.view(-1))
+            # Store in destination tensor (use private attributes)
+            dst._rowwise_data.copy_(quantized.view(src.shape))
+            dst._rowwise_scale_inv.copy_(scale_inv.view(-1))
 
         elif self.block_scaling_dim == 2:
             # 2D block scaling (rowwise + columnwise)
@@ -301,13 +301,13 @@ class FP8DeepGemmQuantizer(Float8BlockQuantizer):
             # Quantize
             quantized = (src_view / combined_scale_inv).to(fp8_dtype)
 
-            # Store in destination tensor
-            dst.rowwise_data.copy_(quantized.view(src.shape))
-            dst.rowwise_scale_inv.copy_(scale_inv_row.view(-1))
+            # Store in destination tensor (use private attributes)
+            dst._rowwise_data.copy_(quantized.view(src.shape))
+            dst._rowwise_scale_inv.copy_(scale_inv_row.view(-1))
 
-            if dst.columnwise_data is not None and dst.columnwise_scale_inv is not None:
+            if dst._columnwise_data is not None and dst._columnwise_scale_inv is not None:
                 # For 2D scaling, also store columnwise scales
-                dst.columnwise_scale_inv.copy_(scale_inv_col.view(-1))
+                dst._columnwise_scale_inv.copy_(scale_inv_col.view(-1))
 
         else:
             raise ValueError(f"Unsupported block_scaling_dim: {self.block_scaling_dim}")
@@ -366,6 +366,26 @@ class FP8DeepGemmQTensor(Float8BlockwiseQTensor):
         # Store DeepGEMM usage flag
         instance._use_deepgemm = use_deepgemm and DEEPGEMM_AVAILABLE
         return instance
+
+    @property
+    def rowwise_data(self) -> Optional[torch.Tensor]:
+        """Access to rowwise data tensor"""
+        return self._rowwise_data
+
+    @property
+    def rowwise_scale_inv(self) -> Optional[torch.Tensor]:
+        """Access to rowwise scale inverse tensor"""
+        return self._rowwise_scale_inv
+
+    @property
+    def columnwise_data(self) -> Optional[torch.Tensor]:
+        """Access to columnwise data tensor"""
+        return self._columnwise_data
+
+    @property
+    def columnwise_scale_inv(self) -> Optional[torch.Tensor]:
+        """Access to columnwise scale inverse tensor"""
+        return self._columnwise_scale_inv
 
     def __repr__(self, *, tensor_contents=None):
         return (
