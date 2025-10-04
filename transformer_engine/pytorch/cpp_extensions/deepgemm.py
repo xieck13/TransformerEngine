@@ -106,7 +106,13 @@ def deepgemm_fp8_gemm(
 
     # Prepare output tensor
     if out_dtype is None:
-        out_dtype = torch.bfloat16  # DeepGEMM default output dtype
+        # Smart dtype selection based on operation type
+        if accumulate or beta is not None:
+            # Backward GEMM operations typically need FP32 for accumulation
+            out_dtype = torch.float32
+        else:
+            # Forward GEMM operations use bfloat16
+            out_dtype = torch.bfloat16
 
     # Calculate output shape
     if layout in ["nt", "nn"]:
@@ -333,7 +339,9 @@ def deepgemm_fp8_grouped_gemm(
 
     # Prepare output tensor
     if out_dtype is None:
-        out_dtype = torch.bfloat16  # DeepGEMM default output dtype
+        # Smart dtype selection based on operation type
+        # Note: grouped GEMM is typically used for MoE which often needs FP32 accumulation
+        out_dtype = torch.float32
 
     out_shape = list(A.shape[:-1]) + [B.shape[-2] if layout == "nt" else B.shape[-1]]
     if out is None:
