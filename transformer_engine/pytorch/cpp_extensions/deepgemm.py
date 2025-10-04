@@ -132,6 +132,19 @@ def deepgemm_fp8_gemm(
         # If pre-allocated tensor has wrong dtype, convert it
         out = out.to(out_dtype)
 
+    # Prepare bias handling FIRST (needed for kernel selection)
+    c_tensor = None
+    if bias is not None:
+        # Only pass c_tensor when we have an actual bias to add
+        if out.shape != bias.shape:
+            # Broadcast bias if needed
+            c_tensor = bias.expand(out.shape).contiguous()
+        else:
+            c_tensor = bias
+        # DeepGEMM requires c_tensor to be float32 when accumulating
+        if c_tensor.dtype != torch.float32:
+            c_tensor = c_tensor.to(torch.float32)
+
     # Prepare FP8 data and scaling factors
     def _get_fp8_data_and_scales(tensor: FP8DeepGemmQTensor, columnwise: bool = False):
         if columnwise and tensor._columnwise_data is not None:
@@ -184,19 +197,6 @@ def deepgemm_fp8_gemm(
         raise RuntimeError(f"Failed to prepare DeepGEMM data: {e}. "
                           f"FP8DeepGemmQTensor objects are only compatible with DeepGEMM operations. "
                           f"Use regular Float8BlockwiseQTensor with general_gemm for fallback capability.")
-
-    # Prepare bias handling
-    c_tensor = None
-    if bias is not None:
-        # Only pass c_tensor when we have an actual bias to add
-        if out.shape != bias.shape:
-            # Broadcast bias if needed
-            c_tensor = bias.expand(out.shape).contiguous()
-        else:
-            c_tensor = bias
-        # DeepGEMM requires c_tensor to be float32 when accumulating
-        if c_tensor.dtype != torch.float32:
-            c_tensor = c_tensor.to(torch.float32)
 
     # Note: accumulate=True without bias means accumulate into output tensor,
     # but DeepGEMM doesn't support this directly - we handle it with alpha/beta scaling
