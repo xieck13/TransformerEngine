@@ -109,10 +109,15 @@ def deepgemm_fp8_gemm(
         # DeepGEMM requirements from gemm.hpp:
         # - Without accumulation (c=None): can use bfloat16
         # - With accumulation (c!=None): MUST use float32
-        if accumulate or beta is not None:
-            out_dtype = torch.float32  # Required for accumulation
+        if bias is not None:
+            # We have bias, so we'll pass c_tensor → need float32
+            out_dtype = torch.float32
+        elif beta is not None:
+            # Beta scaling typically needs float32 precision
+            out_dtype = torch.float32
         else:
-            out_dtype = torch.bfloat16  # Efficient for forward pass
+            # No bias, no beta → can use efficient bfloat16
+            out_dtype = torch.bfloat16
 
     # Calculate output shape
     if layout in ["nt", "nn"]:
@@ -169,6 +174,7 @@ def deepgemm_fp8_gemm(
     # Prepare bias handling
     c_tensor = None
     if bias is not None:
+        # Only pass c_tensor when we have an actual bias to add
         if out.shape != bias.shape:
             # Broadcast bias if needed
             c_tensor = bias.expand(out.shape).contiguous()
@@ -177,11 +183,9 @@ def deepgemm_fp8_gemm(
         # DeepGEMM requires c_tensor to be float32 when accumulating
         if c_tensor.dtype != torch.float32:
             c_tensor = c_tensor.to(torch.float32)
-    elif accumulate:
-        c_tensor = out
-        # DeepGEMM requires c_tensor to be float32 when accumulating
-        if c_tensor.dtype != torch.float32:
-            c_tensor = c_tensor.to(torch.float32)
+
+    # Note: accumulate=True without bias means accumulate into output tensor,
+    # but DeepGEMM doesn't support this directly - we handle it with alpha/beta scaling
 
     try:
         # Call appropriate DeepGEMM kernel using the correct (data, scales) tuple format

@@ -46,9 +46,9 @@ def test_corrected_logic():
 
         # Test cases following DeepGEMM requirements
         test_cases = [
-            (False, None, None, "Forward GEMM (no accumulation) → bfloat16"),
-            (True, None, None, "Forward GEMM (accumulate=True) → float32"),
-            (False, None, torch.randn(M, N, device=device, dtype=torch.bfloat16), "Forward GEMM (with bias) → float32"),
+            (False, None, None, "Forward GEMM (no accumulation, no bias) → bfloat16, c=None"),
+            (False, None, torch.randn(M, N, device=device, dtype=torch.bfloat16), "Forward GEMM (no accumulation, with bias) → float32, c=bias"),
+            (True, None, None, "Accumulate GEMM (accumulate=True, no bias) → bfloat16, c=None + manual accumulation"),
         ]
 
         for accumulate, beta, bias, description in test_cases:
