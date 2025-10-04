@@ -127,26 +127,17 @@ def deepgemm_fp8_gemm(
             raise ValueError("No suitable FP8 data found in tensor")
 
     # Get FP8 data and scales
-    A_data, A_scales = _get_fp8_data_and_scales(A, columnwise=False)
-    B_data, B_scales = _get_fp8_data_and_scales(B, columnwise=(layout in ["nt", "tt"]))
-
-    # Transform scaling factors to DeepGEMM format
     try:
-        # Get tensor dimensions
-        M, K = A_data.shape[-2:]
-        _, N = B_data.shape[-2:]
+        A_data, A_scales = _get_fp8_data_and_scales(A, columnwise=False)
+        B_data, B_scales = _get_fp8_data_and_scales(B, columnwise=(layout in ["nt", "tt"]))
 
-        # Create recipe (assuming standard blockwise scaling)
-        recipe = [1, 1]  # Plain Python list, not tensor
+        # Create DeepGEMM input tuples
+        # DeepGEMM expects (data, scales) tuples directly
+        A_tuple = (A_data, A_scales)
+        B_tuple = (B_data, B_scales)
 
-        A_scales_transformed = deep_gemm.transform_sf_into_required_layout(
-            A_scales, mn=M, k=K, recipe=recipe
-        )
-        B_scales_transformed = deep_gemm.transform_sf_into_required_layout(
-            B_scales, mn=N, k=K, recipe=recipe
-        )
     except Exception as e:
-        warnings.warn(f"Failed to transform scaling factors: {e}")
+        warnings.warn(f"Failed to prepare DeepGEMM data: {e}")
         from ..cpp_extensions.gemm import general_gemm
 
         # Remove out_dtype from kwargs if it exists to avoid duplicate argument
@@ -176,34 +167,42 @@ def deepgemm_fp8_gemm(
         c_tensor = out
 
     try:
-        # Call appropriate DeepGEMM kernel
+        # Call appropriate DeepGEMM kernel using the correct (data, scales) tuple format
         if layout == "nt":
             deep_gemm.fp8_gemm_nt(
-                (A_data, A_scales_transformed),
-                (B_data, B_scales_transformed),
+                A_tuple,
+                B_tuple,
                 out,
-                c=c_tensor
+                c=c_tensor,
+                disable_ue8m0_cast=True,
+                recipe=None
             )
         elif layout == "nn":
             deep_gemm.fp8_gemm_nn(
-                (A_data, A_scales_transformed),
-                (B_data, B_scales_transformed),
+                A_tuple,
+                B_tuple,
                 out,
-                c=c_tensor
+                c=c_tensor,
+                disable_ue8m0_cast=True,
+                recipe=None
             )
         elif layout == "tn":
             deep_gemm.fp8_gemm_tn(
-                (A_data, A_scales_transformed),
-                (B_data, B_scales_transformed),
+                A_tuple,
+                B_tuple,
                 out,
-                c=c_tensor
+                c=c_tensor,
+                disable_ue8m0_cast=True,
+                recipe=None
             )
         elif layout == "tt":
             deep_gemm.fp8_gemm_tt(
-                (A_data, A_scales_transformed),
-                (B_data, B_scales_transformed),
+                A_tuple,
+                B_tuple,
                 out,
-                c=c_tensor
+                c=c_tensor,
+                disable_ue8m0_cast=True,
+                recipe=None
             )
         else:
             raise ValueError(f"Unsupported layout: {layout}")
@@ -344,41 +343,35 @@ def deepgemm_fp8_grouped_gemm(
         else:
             raise ValueError("No suitable FP8 data found in tensor")
 
-    A_data, A_scales = _get_fp8_data_and_scales(A, columnwise=False)
-    B_data, B_scales = _get_fp8_data_and_scales(B, columnwise=(layout == "nt"))
-
     try:
-        # Transform scaling factors to DeepGEMM format
-        # Get tensor dimensions
-        total_M, K = A_data.shape[-2:]
-        _, N = B_data.shape[-2:]
+        # Get FP8 data and scales
+        A_data, A_scales = _get_fp8_data_and_scales(A, columnwise=False)
+        B_data, B_scales = _get_fp8_data_and_scales(B, columnwise=(layout == "nt"))
 
-        # Create recipe (assuming standard blockwise scaling)
-        recipe = [1, 1]  # Plain Python list, not tensor
-
-        A_scales_transformed = deep_gemm.transform_sf_into_required_layout(
-            A_scales, mn=total_M, k=K, recipe=recipe
-        )
-        B_scales_transformed = deep_gemm.transform_sf_into_required_layout(
-            B_scales, mn=N, k=K, recipe=recipe
-        )
+        # Create DeepGEMM input tuples
+        A_tuple = (A_data, A_scales)
+        B_tuple = (B_data, B_scales)
 
         # Call appropriate DeepGEMM grouped kernel
         if layout == "nt":
             deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
-                (A_data, A_scales_transformed),
-                (B_data, B_scales_transformed),
+                A_tuple,
+                B_tuple,
                 out,
                 m_splits.tolist(),
-                c=bias
+                c=bias,
+                disable_ue8m0_cast=True,
+                recipe=None
             )
         elif layout == "nn":
             deep_gemm.m_grouped_fp8_gemm_nn_contiguous(
-                (A_data, A_scales_transformed),
-                (B_data, B_scales_transformed),
+                A_tuple,
+                B_tuple,
                 out,
                 m_splits.tolist(),
-                c=bias
+                c=bias,
+                disable_ue8m0_cast=True,
+                recipe=None
             )
         else:
             raise ValueError(f"Unsupported layout for grouped GEMM: {layout}")

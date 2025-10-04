@@ -484,48 +484,57 @@ class FP8DeepGemmQTensor(Float8BlockwiseQTensor):
             # For now, fall back to regular computation
             return torch.matmul(self.dequantize(), other)
 
-        # Prepare scaling factors in DeepGEMM format
+        # Prepare scaling factors in DeepGEMM format - use tuples directly
         if DEEPGEMM_AVAILABLE:
-            a_scales_transformed = deep_gemm.transform_sf_into_required_layout(scales)
-            b_scales_transformed = deep_gemm.transform_sf_into_required_layout(other_scales)
+            # Create DeepGEMM tuples
+            a_tuple = (fp8_data, scales)
+            b_tuple = (other_fp8_data, other_scales)
         else:
-            a_scales_transformed = scales
-            b_scales_transformed = other_scales
+            # Fallback - shouldn't reach here if DEEPGEMM_AVAILABLE is False
+            return torch.matmul(self.dequantize(), other)
 
         # Prepare output tensor
         if output is None:
             out_shape = list(fp8_data.shape[:-1]) + [other_fp8_data.shape[-1]]
             output = torch.empty(out_shape, dtype=torch.float32, device=fp8_data.device)
 
-        # Call appropriate DeepGEMM kernel
+        # Call appropriate DeepGEMM kernel using correct tuple format
         try:
             if layout == "nt":
                 deep_gemm.fp8_gemm_nt(
-                    (fp8_data, a_scales_transformed),
-                    (other_fp8_data, b_scales_transformed),
+                    a_tuple,
+                    b_tuple,
                     output,
-                    c=output if accumulate else None
+                    c=output if accumulate else None,
+                    disable_ue8m0_cast=True,
+                    recipe=None
                 )
             elif layout == "nn":
                 deep_gemm.fp8_gemm_nn(
-                    (fp8_data, a_scales_transformed),
-                    (other_fp8_data, b_scales_transformed),
+                    a_tuple,
+                    b_tuple,
                     output,
-                    c=output if accumulate else None
+                    c=output if accumulate else None,
+                    disable_ue8m0_cast=True,
+                    recipe=None
                 )
             elif layout == "tn":
                 deep_gemm.fp8_gemm_tn(
-                    (fp8_data, a_scales_transformed),
-                    (other_fp8_data, b_scales_transformed),
+                    a_tuple,
+                    b_tuple,
                     output,
-                    c=output if accumulate else None
+                    c=output if accumulate else None,
+                    disable_ue8m0_cast=True,
+                    recipe=None
                 )
             elif layout == "tt":
                 deep_gemm.fp8_gemm_tt(
-                    (fp8_data, a_scales_transformed),
-                    (other_fp8_data, b_scales_transformed),
+                    a_tuple,
+                    b_tuple,
                     output,
-                    c=output if accumulate else None
+                    c=output if accumulate else None,
+                    disable_ue8m0_cast=True,
+                    recipe=None
                 )
             else:
                 raise ValueError(f"Unsupported layout: {layout}")
