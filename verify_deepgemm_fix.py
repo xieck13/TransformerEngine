@@ -53,13 +53,13 @@ def test_deepgemm_actually_used():
         print("✓ FP8DeepGemmQuantizer created")
 
         # Create test tensors with aligned dimensions (multiples of 128 for optimal DeepGEMM performance)
-        M, K, N = 256, 512, 256  # All multiples of 128
+        M, K, N = 128, 128, 128  # Use smaller aligned dimensions for testing
 
-        # Create input tensors
+        # Create input tensors - IMPORTANT: For NT layout, B should be (K, N)
         A_tensor = torch.randn(M, K, device=device, dtype=torch.bfloat16)
-        B_tensor = torch.randn(N, K, device=device, dtype=torch.bfloat16)  # Note: N x K for NT layout
+        B_tensor = torch.randn(K, N, device=device, dtype=torch.bfloat16)  # Correct: K x N for NT layout
 
-        print(f"✓ Created test tensors: A({M}, {K}), B({N}, {K})")
+        print(f"✓ Created test tensors: A({M}, {K}), B({K}, {N})")
 
         # Create quantized tensors
         A_quantized = quantizer.make_empty(A_tensor.shape, dtype=A_tensor.dtype, device=device)

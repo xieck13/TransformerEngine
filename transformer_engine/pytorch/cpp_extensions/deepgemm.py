@@ -222,7 +222,7 @@ def deepgemm_fp8_gemm(
         return general_gemm(
             A, B, workspace,
             out_dtype=out_dtype,
-            layout=layout,
+            layout=layout.upper(),  # Convert to uppercase for general_gemm
             out=out,
             bias=bias,
             accumulate=accumulate,
