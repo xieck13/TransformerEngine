@@ -141,13 +141,6 @@ def deepgemm_fp8_gemm(
         A_tuple = (A_data, A_scales)
         B_tuple = (B_data, B_scales)
 
-        # Debug: Print what we're passing to DeepGEMM
-        print(f"DEBUG: A_tuple shapes: {A_tuple[0].shape}, {A_tuple[1].shape}")
-        print(f"DEBUG: B_tuple shapes: {B_tuple[0].shape}, {B_tuple[1].shape}")
-        print(f"DEBUG: A_tuple dtypes: {A_tuple[0].dtype}, {A_tuple[1].dtype}")
-        print(f"DEBUG: B_tuple dtypes: {B_tuple[0].dtype}, {B_tuple[1].dtype}")
-        print(f"DEBUG: Output shape: {out.shape}, dtype: {out.dtype}")
-
     except Exception as e:
         warnings.warn(f"Failed to prepare DeepGEMM data: {e}")
         from ..cpp_extensions.gemm import general_gemm

@@ -94,8 +94,8 @@ def test_deepgemm_actually_used():
                 A_quantized,
                 B_quantized,
                 workspace,
-                layout="nt",
-                out_dtype=torch.float32
+                layout="nt"
+                # out_dtype defaults to torch.bfloat16 (DeepGEMM requirement)
             )
 
             print(f"✓ deepgemm_fp8_gemm completed successfully")
