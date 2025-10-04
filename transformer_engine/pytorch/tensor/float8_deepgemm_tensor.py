@@ -95,62 +95,43 @@ class FP8DeepGemmQuantizer(Float8BlockQuantizer):
             warnings.warn("DeepGEMM not available, falling back to regular layout")
 
     def get_scale_shape(self, shape: Iterable[int], columnwise: bool) -> Tuple[int, int]:
-        """Calculate the shape of the scaling tensor for DeepGEMM-compatible blockwise quantization.
+        """Calculate the shape of the scaling tensor for DeepGEMM-compatible quantization.
 
-        This method determines the shape of the scaling tensor needed for blockwise quantization
-        that is optimized for DeepGEMM kernels, while maintaining compatibility with TE.
+        This method matches the exact scale shapes produced by DeepGEMM's utilities:
+        - per_token_cast_to_fp8 produces scales with shape [M, 1] for input [M, K]
+        - per_block_cast_to_fp8 produces scales with shape [blocks_M, blocks_K] for input [M, K]
 
         Parameters
         ----------
         shape : Iterable[int]
             Shape of the input tensor to be quantized
         columnwise : bool
-            Whether to use columnwise scaling (True) or rowwise scaling (False)
+            Whether to use columnwise scaling (per_block) or rowwise scaling (per_token)
 
         Returns
         -------
         Tuple[int, int]
-            Shape of the scaling tensor as (outer_dim, inner_dim)
+            Shape of the scaling tensor as (dim1, dim2)
         """
         if not self.use_deepgemm_layout:
             return super().get_scale_shape(shape, columnwise)
 
-        # DeepGEMM-optimized scale shape calculation
-        M, K = 1, 1
-        for i in range(len(shape) - 1):
-            M *= shape[i]
-        if len(shape) > 0:
-            K = shape[-1]
+        # Calculate tensor dimensions
+        shape_list = list(shape)
+        if len(shape_list) < 2:
+            raise ValueError("DeepGEMM requires at least 2D tensors")
 
-        # DeepGEMM requires TMA-aligned scaling factors
-        if DEEPGEMM_AVAILABLE:
-            # For FP8 tensors, element_size is typically 1 byte
-            # For scaling factors (float32), element_size is 4 bytes
-            element_size = 4  # float32 scaling factors
-            tma_alignment = deep_gemm.get_tma_aligned_size(self.block_len, element_size)
-        else:
-            tma_alignment = 4  # Fallback alignment
+        M, K = shape_list[-2], shape_list[-1]
 
-        if self.block_scaling_dim == 2:
-            # 2D block scaling for DeepGEMM
-            if columnwise:
-                outer = math.ceil(K / self.block_len)
-                inner = round_up_to_nearest_multiple(math.ceil(M / self.block_len), tma_alignment)
-                return (outer, inner)
-            # rowwise
-            outer = math.ceil(M / self.block_len)
-            inner = round_up_to_nearest_multiple(math.ceil(K / self.block_len), tma_alignment)
-            return (outer, inner)
+        if columnwise:
+            # per_block_cast_to_fp8: returns [ceil(M/128), ceil(K/128)] for [M, K] input
+            block_size = 128  # DeepGEMM block size
+            blocks_M = math.ceil(M / block_size)
+            blocks_K = math.ceil(K / block_size)
+            return (blocks_M, blocks_K)
         else:
-            # 1D block scaling
-            if columnwise:
-                outer = math.ceil(M / self.block_len)
-                inner = round_up_to_nearest_multiple(K, tma_alignment)
-                return (outer, inner)
-            # rowwise
-            outer = math.ceil(K / self.block_len)
-            inner = round_up_to_nearest_multiple(M, tma_alignment)
-            return (outer, inner)
+            # per_token_cast_to_fp8: returns [M, 1] for [M, K] input
+            return (M, 1)
 
     def make_empty(
         self,
