@@ -180,19 +180,21 @@ def deepgemm_fp8_gemm(
         A_data, A_scales = _get_fp8_data_and_scales(A, columnwise=False)
 
         # B tensor quantization depends on kernel type:
-        # - 1D1D kernels (accumulation): need per_token quantization for B
-        # - 1D2D kernels (no accumulation): need per_block quantization for B
+        # - 1D1D kernels (accumulation): need per_token quantization for B (rowwise)
+        # - 1D2D kernels (no accumulation): need per_block quantization for B (columnwise)
         if needs_accumulation_in_kernel:
             # 1D1D kernel: B should use per_token quantization (rowwise)
             if B._rowwise_data is not None:
                 B_data, B_scales = B._rowwise_data, B._rowwise_scale_inv
+                print(f"DEBUG: Using rowwise B data for 1D1D kernel")
             else:
-                # Fallback to columnwise if rowwise not available
-                warnings.warn("B tensor not quantized with per_token for 1D1D kernel - may cause scale layout errors")
-                B_data, B_scales = _get_fp8_data_and_scales(B, columnwise=True)
+                # If rowwise not available, this is an error for 1D1D kernels
+                raise RuntimeError("1D1D kernel requires B tensor to have rowwise (per_token) quantization, "
+                                 "but only columnwise data is available. Please quantize B tensor with rowwise=True.")
         else:
             # 1D2D kernel: B uses per_block quantization (columnwise)
             B_data, B_scales = _get_fp8_data_and_scales(B, columnwise=True)
+            print(f"DEBUG: Using columnwise B data for 1D2D kernel")
 
         # Create DeepGEMM input tuples
         # DeepGEMM expects (data, scales) tuples directly
