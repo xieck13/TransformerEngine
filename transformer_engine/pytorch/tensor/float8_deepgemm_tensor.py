@@ -124,7 +124,10 @@ class FP8DeepGemmQuantizer(Float8BlockQuantizer):
 
         # DeepGEMM requires TMA-aligned scaling factors
         if DEEPGEMM_AVAILABLE:
-            tma_alignment = deep_gemm.get_tma_aligned_size()
+            # For FP8 tensors, element_size is typically 1 byte
+            # For scaling factors (float32), element_size is 4 bytes
+            element_size = 4  # float32 scaling factors
+            tma_alignment = deep_gemm.get_tma_aligned_size(self.block_len, element_size)
         else:
             tma_alignment = 4  # Fallback alignment
 
