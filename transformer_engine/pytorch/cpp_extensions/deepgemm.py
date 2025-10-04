@@ -106,7 +106,7 @@ def deepgemm_fp8_gemm(
 
     # Prepare output tensor
     if out_dtype is None:
-        out_dtype = torch.float32
+        out_dtype = torch.bfloat16  # DeepGEMM default output dtype
 
     # Calculate output shape
     if layout in ["nt", "nn"]:
@@ -128,8 +128,9 @@ def deepgemm_fp8_gemm(
 
     # Get FP8 data and scales
     try:
+        # A tensor always uses rowwise (per_token), B tensor always uses columnwise (per_block)
         A_data, A_scales = _get_fp8_data_and_scales(A, columnwise=False)
-        B_data, B_scales = _get_fp8_data_and_scales(B, columnwise=(layout in ["nt", "tt"]))
+        B_data, B_scales = _get_fp8_data_and_scales(B, columnwise=True)
 
         # Create DeepGEMM input tuples
         # DeepGEMM expects (data, scales) tuples directly
@@ -328,7 +329,7 @@ def deepgemm_fp8_grouped_gemm(
 
     # Prepare output tensor
     if out_dtype is None:
-        out_dtype = torch.float32
+        out_dtype = torch.bfloat16  # DeepGEMM default output dtype
 
     out_shape = list(A.shape[:-1]) + [B.shape[-2] if layout == "nt" else B.shape[-1]]
     if out is None:
@@ -344,9 +345,9 @@ def deepgemm_fp8_grouped_gemm(
             raise ValueError("No suitable FP8 data found in tensor")
 
     try:
-        # Get FP8 data and scales
+        # A tensor always uses rowwise (per_token), B tensor always uses columnwise (per_block)
         A_data, A_scales = _get_fp8_data_and_scales(A, columnwise=False)
-        B_data, B_scales = _get_fp8_data_and_scales(B, columnwise=(layout == "nt"))
+        B_data, B_scales = _get_fp8_data_and_scales(B, columnwise=True)
 
         # Create DeepGEMM input tuples
         A_tuple = (A_data, A_scales)
