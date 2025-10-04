@@ -157,23 +157,10 @@ def deepgemm_fp8_gemm(
         B_tuple = (B_data, B_scales)
 
     except Exception as e:
-        warnings.warn(f"Failed to prepare DeepGEMM data: {e}")
-        from ..cpp_extensions.gemm import general_gemm
-
-        # Remove out_dtype from kwargs if it exists to avoid duplicate argument
-        kwargs_filtered = {k: v for k, v in kwargs.items() if k != 'out_dtype'}
-
-        return general_gemm(
-            A, B, workspace,
-            out_dtype=out_dtype,
-            layout=layout.upper(),  # Convert to uppercase for general_gemm
-            out=out,
-            bias=bias,
-            accumulate=accumulate,
-            alpha=alpha,
-            beta=beta,
-            **kwargs_filtered
-        )
+        # Rather than complex fallback logic, fail cleanly with clear error message
+        raise RuntimeError(f"Failed to prepare DeepGEMM data: {e}. "
+                          f"FP8DeepGemmQTensor objects are only compatible with DeepGEMM operations. "
+                          f"Use regular Float8BlockwiseQTensor with general_gemm for fallback capability.")
 
     # Prepare bias handling
     c_tensor = None
@@ -253,19 +240,9 @@ def deepgemm_fp8_gemm(
         return (out, workspace)
 
     except Exception as e:
-        warnings.warn(f"DeepGEMM operation failed: {e}. Falling back to regular GEMM.")
-        from ..cpp_extensions.gemm import general_gemm
-        return general_gemm(
-            A, B, workspace,
-            out_dtype=out_dtype,
-            layout=layout.upper(),  # Convert to uppercase for general_gemm
-            out=out,
-            bias=bias,
-            accumulate=accumulate,
-            alpha=alpha,
-            beta=beta,
-            **kwargs
-        )
+        # Rather than complex fallback logic, fail cleanly with clear error message
+        raise RuntimeError(f"DeepGEMM operation failed: {e}. "
+                          f"FP8DeepGemmQTensor objects are only compatible with DeepGEMM operations.")
 
 
 def deepgemm_fp8_grouped_gemm(

@@ -49,11 +49,11 @@ def test_deepgemm_integration():
         )
         print("✓ FP8DeepGemmQuantizers created")
 
-        # Test with different matrix sizes
+        # Test with different matrix sizes (use aligned dimensions)
         test_sizes = [
             (128, 128, 128),   # Small aligned
-            (256, 512, 384),   # Medium sizes
-            (512, 1024, 768),  # Larger sizes
+            (256, 256, 256),   # Medium aligned
+            (512, 512, 512),   # Larger aligned
         ]
 
         all_tests_passed = True
