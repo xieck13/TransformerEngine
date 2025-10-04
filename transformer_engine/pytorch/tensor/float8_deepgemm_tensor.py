@@ -216,6 +216,7 @@ class FP8DeepGemmQuantizer(Float8BlockQuantizer):
         self,
         src: torch.Tensor,
         dst: FP8DeepGemmQTensor,
+        *,
         noop_flag: Optional[torch.Tensor] = None,
     ) -> None:
         """Custom quantization update for DeepGEMM compatibility
@@ -232,10 +233,16 @@ class FP8DeepGemmQuantizer(Float8BlockQuantizer):
         # Use parent class method but catch the C++ extension error
         try:
             # First try the parent implementation
-            super().update_quantized(src, dst, noop_flag)
+            super().update_quantized(src, dst, noop_flag=noop_flag)
         except RuntimeError as e:
             if "Unexpected type for quantizer" in str(e):
                 # Handle quantization manually for DeepGEMM compatibility
+                self._manual_update_quantized(src, dst)
+            else:
+                raise e
+        except TypeError as e:
+            if "takes 3 positional arguments but 4 were given" in str(e):
+                # Handle manual quantization directly
                 self._manual_update_quantized(src, dst)
             else:
                 raise e
