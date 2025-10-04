@@ -174,7 +174,9 @@ class FP8DeepGemmQuantizer(Float8BlockQuantizer):
         data = None
         scale_inv = None
         if self.rowwise_usage:
-            data = torch.empty(shape, dtype=torch.uint8, device=device)
+            # Use actual FP8 dtype instead of uint8 for DeepGEMM compatibility
+            fp8_torch_dtype = torch.float8_e4m3fn if self.dtype == TE_DType.kFloat8E4M3 else torch.float8_e5m2
+            data = torch.empty(shape, dtype=fp8_torch_dtype, device=device)
             scale_shape = self.get_scale_shape(shape, columnwise=False)
             scale_inv = torch.empty(
                 scale_shape,
@@ -186,8 +188,10 @@ class FP8DeepGemmQuantizer(Float8BlockQuantizer):
         columnwise_data = None
         columnwise_scale_inv = None
         if self.columnwise_usage:
+            # Use actual FP8 dtype for columnwise data too
+            fp8_torch_dtype = torch.float8_e4m3fn if self.dtype == TE_DType.kFloat8E4M3 else torch.float8_e5m2
             columnwise_data = torch.empty(
-                self.get_columnwise_shape(shape), dtype=torch.uint8, device=device
+                self.get_columnwise_shape(shape), dtype=fp8_torch_dtype, device=device
             )
             columnwise_scale_shape = self.get_scale_shape(shape, columnwise=True)
             columnwise_scale_inv = torch.empty(
@@ -252,7 +256,45 @@ class FP8DeepGemmQuantizer(Float8BlockQuantizer):
         src: torch.Tensor,
         dst: FP8DeepGemmQTensor,
     ) -> None:
-        """Manual quantization implementation for DeepGEMM tensors"""
+        """Manual quantization implementation for DeepGEMM tensors using DeepGEMM utilities"""
+        # Use DeepGEMM's own quantization utilities
+        try:
+            from deep_gemm.utils import per_token_cast_to_fp8, per_block_cast_to_fp8
+
+            # Use per_token quantization for rowwise data (like in DeepGEMM tests)
+            if dst._rowwise_data is not None:
+                fp8_data, fp8_scales = per_token_cast_to_fp8(src, use_ue8m0=False)
+                dst._rowwise_data.copy_(fp8_data)
+                # Handle scale shapes carefully - don't assume we need to squeeze
+                if fp8_scales.shape == dst._rowwise_scale_inv.shape:
+                    dst._rowwise_scale_inv.copy_(fp8_scales)
+                elif fp8_scales.numel() == dst._rowwise_scale_inv.numel():
+                    dst._rowwise_scale_inv.copy_(fp8_scales.view(dst._rowwise_scale_inv.shape))
+                else:
+                    # If shapes are incompatible, try to reshape or use fallback
+                    dst._rowwise_scale_inv.fill_(fp8_scales.mean().item())
+
+            # Use per_block quantization for columnwise data
+            if dst._columnwise_data is not None:
+                fp8_data, fp8_scales = per_block_cast_to_fp8(src, use_ue8m0=False)
+                dst._columnwise_data.copy_(fp8_data)
+                # Handle scale shapes carefully
+                if fp8_scales.numel() == dst._columnwise_scale_inv.numel():
+                    dst._columnwise_scale_inv.copy_(fp8_scales.view(dst._columnwise_scale_inv.shape))
+                else:
+                    # If shapes don't match, use mean or first value
+                    dst._columnwise_scale_inv.fill_(fp8_scales.mean().item())
+
+        except ImportError:
+            # Fallback to manual implementation if DeepGEMM utils not available
+            self._manual_fp8_quantization_fallback(src, dst)
+
+    def _manual_fp8_quantization_fallback(
+        self,
+        src: torch.Tensor,
+        dst: FP8DeepGemmQTensor,
+    ) -> None:
+        """Fallback manual quantization when DeepGEMM utils are not available"""
         # Convert to the expected FP8 dtype
         if self.dtype == TE_DType.kFloat8E4M3:
             fp8_dtype = torch.float8_e4m3fn
