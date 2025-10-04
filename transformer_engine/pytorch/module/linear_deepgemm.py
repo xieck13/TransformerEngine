@@ -12,8 +12,8 @@ from transformer_engine_torch import DType as TE_DType
 
 from ..tensor.float8_deepgemm_tensor import FP8DeepGemmQuantizer, FP8DeepGemmQTensor
 from ..cpp_extensions.deepgemm import deepgemm_fp8_gemm
-from ..utils import get_workspace, _empty_tensor
-from .base import TransformerEngineBaseModule
+from ..utils import _empty_tensor
+from .base import TransformerEngineBaseModule, get_workspace
 
 
 class LinearDeepGemm(TransformerEngineBaseModule):
