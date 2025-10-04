@@ -90,13 +90,19 @@ def test_deepgemm_integration():
                 {
                     "name": "Forward GEMM (with bias)",
                     "kwargs": {"layout": "nt", "bias": torch.randn(M, N, device=device, dtype=torch.bfloat16)},
-                    "expected_dtype": torch.float32,
-                    "expected_kernel": "1D1D"
+                    "expected_dtype": torch.bfloat16,  # Fixed: forward pass uses 1D2D kernel
+                    "expected_kernel": "1D2D"
                 },
                 {
                     "name": "Forward GEMM (with beta)",
                     "kwargs": {"layout": "nt", "beta": 0.5},
-                    "expected_dtype": torch.float32,
+                    "expected_dtype": torch.bfloat16,  # Fixed: forward pass uses 1D2D kernel
+                    "expected_kernel": "1D2D"
+                },
+                {
+                    "name": "Accumulation GEMM (bias + accumulate)",
+                    "kwargs": {"layout": "nt", "bias": torch.randn(M, N, device=device, dtype=torch.bfloat16), "accumulate": True},
+                    "expected_dtype": torch.float32,  # This should use 1D1D kernel
                     "expected_kernel": "1D1D"
                 },
                 {
