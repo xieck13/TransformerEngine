@@ -12,3 +12,8 @@ from .rmsnorm import RMSNorm
 from .fp8_padding import Fp8Padding
 from .fp8_unpadding import Fp8Unpadding
 from .base import initialize_ub, destroy_ub, UserBufferQuantizationMode
+
+# DeepGEMM-optimized modules
+from .linear_deepgemm import LinearDeepGemm
+from .layernorm_linear_deepgemm import LayerNormLinearDeepGemm
+from .grouped_linear_deepgemm import GroupedLinearDeepGemm
