@@ -137,7 +137,7 @@ def deepgemm_fp8_gemm(
         _, N = B_data.shape[-2:]
 
         # Create recipe (assuming standard blockwise scaling)
-        recipe = torch.tensor([1, 1], dtype=torch.int, device=A_data.device)  # [row_block, col_block]
+        recipe = [1, 1]  # Plain Python list, not tensor
 
         A_scales_transformed = deep_gemm.transform_sf_into_required_layout(
             A_scales, mn=M, k=K, recipe=recipe
@@ -354,7 +354,7 @@ def deepgemm_fp8_grouped_gemm(
         _, N = B_data.shape[-2:]
 
         # Create recipe (assuming standard blockwise scaling)
-        recipe = torch.tensor([1, 1], dtype=torch.int, device=A_data.device)
+        recipe = [1, 1]  # Plain Python list, not tensor
 
         A_scales_transformed = deep_gemm.transform_sf_into_required_layout(
             A_scales, mn=total_M, k=K, recipe=recipe
