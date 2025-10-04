@@ -10,10 +10,24 @@ import sys
 import warnings
 import torch
 import torch.nn.functional as F
-from transformer_engine_torch import DType as TE_DType
 
-# Add TransformerEngine to path
-sys.path.insert(0, '/Users/xiecongkai/TransformerEngine')
+# Check if TransformerEngine is properly installed
+print("Checking TransformerEngine installation...")
+
+try:
+    import transformer_engine_torch as tex
+    TE_DType = tex.DType
+    print("✓ transformer_engine_torch compiled extension found")
+except ImportError as e:
+    print(f"✗ transformer_engine_torch not available: {e}")
+    print("TransformerEngine needs to be properly compiled and installed.")
+    print("Please run: pip install transformer-engine[pytorch] or build from source.")
+    sys.exit(1)
+
+# Add TransformerEngine to path (use current directory)
+import os
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, current_dir)
 
 try:
     # Import our new classes
