@@ -106,13 +106,13 @@ def deepgemm_fp8_gemm(
 
     # Prepare output tensor
     if out_dtype is None:
-        # Smart dtype selection based on operation type
+        # DeepGEMM requirements from gemm.hpp:
+        # - Without accumulation (c=None): can use bfloat16
+        # - With accumulation (c!=None): MUST use float32
         if accumulate or beta is not None:
-            # Backward GEMM operations typically need FP32 for accumulation
-            out_dtype = torch.float32
+            out_dtype = torch.float32  # Required for accumulation
         else:
-            # Forward GEMM operations use bfloat16
-            out_dtype = torch.bfloat16
+            out_dtype = torch.bfloat16  # Efficient for forward pass
 
     # Calculate output shape
     if layout in ["nt", "nn"]:
@@ -174,8 +174,14 @@ def deepgemm_fp8_gemm(
             c_tensor = bias.expand(out.shape).contiguous()
         else:
             c_tensor = bias
+        # DeepGEMM requires c_tensor to be float32 when accumulating
+        if c_tensor.dtype != torch.float32:
+            c_tensor = c_tensor.to(torch.float32)
     elif accumulate:
         c_tensor = out
+        # DeepGEMM requires c_tensor to be float32 when accumulating
+        if c_tensor.dtype != torch.float32:
+            c_tensor = c_tensor.to(torch.float32)
 
     try:
         # Call appropriate DeepGEMM kernel using the correct (data, scales) tuple format
