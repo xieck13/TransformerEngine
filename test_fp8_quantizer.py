@@ -56,14 +56,20 @@ def test_fp8_quantizer():
 
         import deep_gemm
 
-        # Create another quantized tensor for B
+        # Create another quantized tensor for B - use columnwise=True for per_block quantization
+        B_quantizer = FP8DeepGemmQuantizer(
+            fp8_dtype=TE_DType.kFloat8E4M3,
+            rowwise=False,
+            columnwise=True,  # Use columnwise for per_block quantization
+            use_deepgemm_layout=True
+        )
         B_tensor = torch.randn(K, M, device=device, dtype=torch.bfloat16)  # K x M for NT
-        B_quantized = quantizer.make_empty(B_tensor.shape, dtype=B_tensor.dtype, device=device)
-        quantizer.update_quantized(B_tensor, B_quantized)
+        B_quantized = B_quantizer.make_empty(B_tensor.shape, dtype=B_tensor.dtype, device=device)
+        B_quantizer.update_quantized(B_tensor, B_quantized)
 
-        # Extract tuples
+        # Extract tuples - use the appropriate data based on quantization type
         A_tuple = (quantized_tensor._rowwise_data, quantized_tensor._rowwise_scale_inv)
-        B_tuple = (B_quantized._rowwise_data, B_quantized._rowwise_scale_inv)
+        B_tuple = (B_quantized._columnwise_data, B_quantized._columnwise_scale_inv)
 
         print(f"A tuple shapes: {A_tuple[0].shape}, {A_tuple[1].shape}")
         print(f"B tuple shapes: {B_tuple[0].shape}, {B_tuple[1].shape}")
