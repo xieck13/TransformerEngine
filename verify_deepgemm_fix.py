@@ -43,14 +43,21 @@ def test_deepgemm_actually_used():
 
         print(f"✓ Using device: {device}")
 
-        # Create quantizer
-        quantizer = FP8DeepGemmQuantizer(
+        # Create quantizers - different settings for A and B to match DeepGEMM expectations
+        A_quantizer = FP8DeepGemmQuantizer(
             fp8_dtype=TE_DType.kFloat8E4M3,
             rowwise=True,
-            columnwise=True,
+            columnwise=False,  # A uses per_token (rowwise)
             use_deepgemm_layout=True
         )
-        print("✓ FP8DeepGemmQuantizer created")
+
+        B_quantizer = FP8DeepGemmQuantizer(
+            fp8_dtype=TE_DType.kFloat8E4M3,
+            rowwise=False,
+            columnwise=True,  # B uses per_block (columnwise)
+            use_deepgemm_layout=True
+        )
+        print("✓ FP8DeepGemmQuantizers created")
 
         # Create test tensors with aligned dimensions (multiples of 128 for optimal DeepGEMM performance)
         M, K, N = 128, 128, 128  # Use smaller aligned dimensions for testing
@@ -61,13 +68,13 @@ def test_deepgemm_actually_used():
 
         print(f"✓ Created test tensors: A({M}, {K}), B({K}, {N})")
 
-        # Create quantized tensors
-        A_quantized = quantizer.make_empty(A_tensor.shape, dtype=A_tensor.dtype, device=device)
-        B_quantized = quantizer.make_empty(B_tensor.shape, dtype=B_tensor.dtype, device=device)
+        # Create quantized tensors using appropriate quantizers
+        A_quantized = A_quantizer.make_empty(A_tensor.shape, dtype=A_tensor.dtype, device=device)
+        B_quantized = B_quantizer.make_empty(B_tensor.shape, dtype=B_tensor.dtype, device=device)
 
         # Quantize the tensors
-        quantizer.update_quantized(A_tensor, A_quantized)
-        quantizer.update_quantized(B_tensor, B_quantized)
+        A_quantizer.update_quantized(A_tensor, A_quantized)
+        B_quantizer.update_quantized(B_tensor, B_quantized)
 
         print("✓ Tensors quantized successfully")
 
