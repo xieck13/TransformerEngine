@@ -131,75 +131,57 @@ class _LayerNormLinearDeepGemm(torch.autograd.Function):
         if ln_out.dim() > 2:
             ln_out = ln_out.view((-1, ln_out.shape[-1]))
 
-        # Check DeepGEMM requirements
-        can_use_deepgemm = (use_deepgemm and
-                           ln_out.dim() == 2 and
-                           ln_out.shape[-1] % 128 == 0 and
-                           weight.shape[-1] % 128 == 0 and
-                           weight.shape[0] % 128 == 0)
+        # Check DeepGEMM requirements - raise error if not met
+        if not (ln_out.dim() == 2 and
+                ln_out.shape[-1] % 128 == 0 and
+                weight.shape[-1] % 128 == 0 and
+                weight.shape[0] % 128 == 0):
+            raise RuntimeError(f"DeepGEMM requirements not met. "
+                             f"ln_out: {ln_out.shape} (must be 2D, last dim % 128 == 0), "
+                             f"weight: {weight.shape} (both dims % 128 == 0)")
 
-        if use_deepgemm and not can_use_deepgemm:
-            warnings.warn(f"Cannot use DeepGEMM: tensor shapes don't meet requirements. "
-                         f"ln_out: {ln_out.shape}, weight: {weight.shape}")
-            use_deepgemm = False
+        if not use_deepgemm:
+            raise RuntimeError("DeepGEMM is disabled but LayerNormLinearDeepGemm requires DeepGEMM")
 
-        # Quantize layer norm output if needed
-        if can_use_deepgemm and input_quantizer is not None and isinstance(input_quantizer, FP8DeepGemmQuantizer):
-            quantized_ln_out = input_quantizer.make_empty(
-                ln_out.shape,
-                dtype=ln_out.dtype,
-                device=ln_out.device
-            )
-            input_quantizer.update_quantized(ln_out, quantized_ln_out)
-        else:
-            quantized_ln_out = ln_out
+        # Quantize layer norm output - must succeed for DeepGEMM
+        if input_quantizer is None or not isinstance(input_quantizer, FP8DeepGemmQuantizer):
+            raise RuntimeError("LayerNormLinearDeepGemm requires FP8DeepGemmQuantizer for input")
 
-        # Quantize weight if needed
-        if can_use_deepgemm and weight_quantizer is not None and isinstance(weight_quantizer, FP8DeepGemmQuantizer):
-            quantized_weight = weight_quantizer.make_empty(
-                weight.shape,
-                dtype=weight.dtype,
-                device=weight.device
-            )
-            weight_quantizer.update_quantized(weight, quantized_weight)
-        else:
-            quantized_weight = weight
+        quantized_ln_out = input_quantizer.make_empty(
+            ln_out.shape,
+            dtype=ln_out.dtype,
+            device=ln_out.device
+        )
+        input_quantizer.update_quantized(ln_out, quantized_ln_out)
 
-        # Perform GEMM using DeepGEMM if both inputs are quantized
+        # Quantize weight - must succeed for DeepGEMM
+        if weight_quantizer is None or not isinstance(weight_quantizer, FP8DeepGemmQuantizer):
+            raise RuntimeError("LayerNormLinearDeepGemm requires FP8DeepGemmQuantizer for weight")
+
+        quantized_weight = weight_quantizer.make_empty(
+            weight.shape,
+            dtype=weight.dtype,
+            device=weight.device
+        )
+        weight_quantizer.update_quantized(weight, quantized_weight)
+
+        # Perform GEMM using DeepGEMM - no fallback
         workspace = get_workspace()
 
-        if (can_use_deepgemm and
-            isinstance(quantized_ln_out, FP8DeepGemmQTensor) and
-            isinstance(quantized_weight, FP8DeepGemmQTensor)):
-            try:
-                output, _ = deepgemm_fp8_gemm(
-                    quantized_ln_out,
-                    quantized_weight,
-                    workspace,
-                    layout="nt",
-                    bias=bias,
-                    out_dtype=activation_dtype
-                )
-                print(f"DEBUG: Successfully used DeepGEMM for LayerNormLinear forward")
-            except Exception as e:
-                warnings.warn(f"DeepGEMM failed, falling back to regular GEMM: {e}")
-                # Fall back to regular computation
-                if isinstance(quantized_ln_out, FP8DeepGemmQTensor):
-                    quantized_ln_out = quantized_ln_out.dequantize()
-                if isinstance(quantized_weight, FP8DeepGemmQTensor):
-                    quantized_weight = quantized_weight.dequantize()
-                output = torch.matmul(quantized_ln_out, quantized_weight.T)
-                if bias is not None:
-                    output = output + bias
-        else:
-            # Regular GEMM
-            if isinstance(quantized_ln_out, FP8DeepGemmQTensor):
-                quantized_ln_out = quantized_ln_out.dequantize()
-            if isinstance(quantized_weight, FP8DeepGemmQTensor):
-                quantized_weight = quantized_weight.dequantize()
-            output = torch.matmul(quantized_ln_out, quantized_weight.T)
-            if bias is not None:
-                output = output + bias
+        if not (isinstance(quantized_ln_out, FP8DeepGemmQTensor) and
+                isinstance(quantized_weight, FP8DeepGemmQTensor)):
+            raise RuntimeError(f"Expected FP8DeepGemmQTensor objects, got {type(quantized_ln_out)}, {type(quantized_weight)}")
+
+        # DeepGEMM forward GEMM - must succeed
+        output, _ = deepgemm_fp8_gemm(
+            quantized_ln_out,
+            quantized_weight,
+            workspace,
+            layout="nt",
+            bias=bias,
+            out_dtype=activation_dtype
+        )
+        print(f"DEBUG: Successfully used DeepGEMM for LayerNormLinear forward")
 
         # Reshape output back to original shape
         output = output.view(inp_shape[:-1] + (output.shape[-1],))
@@ -292,76 +274,70 @@ class _LayerNormLinearDeepGemm(torch.autograd.Function):
             if hasattr(weight, 'main_grad') and weight.main_grad is not None:
                 main_grad = weight.main_grad.detach()
 
-            # Convert ln_out to FP8 for wgrad - transpose it for NT layout
-            # For NT layout: A @ B.T where A=ln_out.T, B.T=grad_output, so B=grad_output.T
-            ln_out_quantizer = FP8DeepGemmQuantizer(
-                TE_DType.kFloat8E4M3,
-                rowwise=True,
-                columnwise=False,  # Use rowwise only for better 1D1D compatibility
-                use_deepgemm_layout=True,
-            )
-            # Transpose ln_out for wgrad computation: ln_out.T @ grad_output
-            ln_out_transposed = ln_out.t().contiguous()
-            ln_out_fp8 = ln_out_quantizer.make_empty(
-                ln_out_transposed.shape, dtype=ln_out_transposed.dtype, device=ln_out_transposed.device
-            )
-            ln_out_quantizer.update_quantized(ln_out_transposed, ln_out_fp8)
-
-            # Convert grad_output to FP8 for wgrad - transpose it for NT layout
+            # Convert grad_output to FP8 for wgrad - for correct wgrad computation
+            # wgrad: grad_weight = grad_output.T @ ln_out
+            # For NT layout: A @ B.T where A=grad_output.T, B.T=ln_out, so B=ln_out.T
             grad_output_quantizer_wgrad = FP8DeepGemmQuantizer(
                 TE_DType.kFloat8E4M3,
                 rowwise=True,
-                columnwise=True,  # Use columnwise for B tensor in NT layout
+                columnwise=False,  # A tensor uses rowwise
                 use_deepgemm_layout=True,
             )
-            # Transpose grad_output for wgrad: ln_out.T @ grad_output
+            # Transpose grad_output for correct wgrad computation
             grad_output_transposed = grad_output.t().contiguous()
             grad_output_fp8_wgrad = grad_output_quantizer_wgrad.make_empty(
                 grad_output_transposed.shape, dtype=grad_output_transposed.dtype, device=grad_output_transposed.device
             )
             grad_output_quantizer_wgrad.update_quantized(grad_output_transposed, grad_output_fp8_wgrad)
 
-            # Create output tensor for wgrad - KEY: Use fp32 for precision
+            # Convert ln_out to FP8 for wgrad - transpose for NT layout B tensor
+            ln_out_quantizer = FP8DeepGemmQuantizer(
+                TE_DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=True,  # B tensor uses columnwise for NT layout
+                use_deepgemm_layout=True,
+            )
+            # Transpose ln_out for NT layout: grad_output.T @ ln_out.T (which is B.T)
+            ln_out_transposed = ln_out.t().contiguous()
+            ln_out_fp8 = ln_out_quantizer.make_empty(
+                ln_out_transposed.shape, dtype=ln_out_transposed.dtype, device=ln_out_transposed.device
+            )
+            ln_out_quantizer.update_quantized(ln_out_transposed, ln_out_fp8)
+
+            # Create output tensor for wgrad
             use_accumulation = main_grad is not None
             if use_accumulation:
-                # For main_grad accumulation, use fp32 output
+                # For main_grad accumulation, use bfloat16 output and handle fp32 accumulation in software
                 grad_weight_out = torch.empty(
-                    weight.shape, dtype=torch.float32, device=weight.device
+                    weight.shape, dtype=ctx.activation_dtype, device=weight.device  # Use ctx.activation_dtype (bfloat16)
                 )
             else:
                 grad_weight_out = torch.empty(
                     weight.shape, dtype=ctx.activation_dtype, device=weight.device
                 )
 
-            # wgrad: grad_weight = ln_out.T @ grad_output (NT layout)
-            # For now, use fallback to general_gemm for wgrad to ensure correctness
-            # Future work: optimize this to use native DeepGEMM 1D1D kernels
-            print(f"DEBUG: LayerNormLinear wgrad - using general_gemm fallback for precision")
+            # wgrad: grad_weight = grad_output.T @ ln_out (NT layout)
+            # For NT layout: A @ B.T where A=grad_output.T, B.T=ln_out, so B=ln_out.T
+            # grad_output.T: [out_features, batch*seq] @ ln_out: [batch*seq, in_features] -> [out_features, in_features]
 
-            from ..cpp_extensions.gemm import general_gemm
-            workspace = get_workspace()
+            print(f"DEBUG: LayerNormLinear wgrad 1D1D - grad_output: {grad_output.shape} -> transposed: {grad_output_transposed.shape}, ln_out: {ln_out.shape} -> transposed: {ln_out_transposed.shape}, expected output: {weight.shape}")
 
-            wgrad_gemm_kwargs = {
-                "workspace": workspace,
-                "out_dtype": torch.float32 if use_accumulation else ctx.activation_dtype,
-                "accumulate": use_accumulation,
-                "layout": "NT",
-                "out": main_grad if use_accumulation else None,
-                "use_split_accumulator": True,  # Enable split accumulator for precision
-                "grad": True,
-            }
-
-            # Call wgrad GEMM: ln_out.T @ grad_output
-            # A = ln_out_transposed [256, 128], B = grad_output [128, 512]
-            # For NT layout: A @ B.T, so we need grad_output.T as input
-            grad_weight_result, _ = general_gemm(ln_out_transposed, grad_output.t(), **wgrad_gemm_kwargs)
+            deep_gemm.fp8_gemm_nt(
+                (grad_output_fp8_wgrad.rowwise_data, grad_output_fp8_wgrad.rowwise_scale_inv),  # A tensor
+                (ln_out_fp8.columnwise_data, ln_out_fp8.columnwise_scale_inv),  # B tensor
+                grad_weight_out,
+                c=None,  # Start with basic case, no accumulation
+                recipe=None  # Start with basic case, no forced recipe
+            )
 
             if use_accumulation:
-                print(f"DEBUG: Successfully used general_gemm for LayerNormLinear wgrad with fp32 accumulation")
+                # Accumulate into main_grad in fp32 for precision
+                main_grad.add_(grad_weight_out.to(torch.float32))
+                print(f"DEBUG: Successfully used DeepGEMM 1D1D fp8_gemm_nt for LayerNormLinear wgrad with fp32 accumulation")
                 grad_weight = None  # Don't return grad_weight when accumulating into main_grad
             else:
-                print(f"DEBUG: Successfully used general_gemm for LayerNormLinear wgrad")
-                grad_weight = grad_weight_result
+                print(f"DEBUG: Successfully used DeepGEMM 1D1D fp8_gemm_nt for LayerNormLinear wgrad")
+                grad_weight = grad_weight_out
 
         # ==========================================
         # Compute grad bias
