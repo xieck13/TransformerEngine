@@ -135,10 +135,12 @@ class _LayerNormLinearDeepGemm(torch.autograd.Function):
         if not (ln_out.dim() == 2 and
                 ln_out.shape[-1] % 128 == 0 and
                 weight.shape[-1] % 128 == 0 and
-                weight.shape[0] % 128 == 0):
+                weight.shape[0] % 128 == 0 and
+                ln_out.shape[0] % 128 == 0):  # Also check batch dimension for wgrad
             raise RuntimeError(f"DeepGEMM requirements not met. "
-                             f"ln_out: {ln_out.shape} (must be 2D, last dim % 128 == 0), "
-                             f"weight: {weight.shape} (both dims % 128 == 0)")
+                             f"ln_out: {ln_out.shape} (must be 2D, both dims % 128 == 0), "
+                             f"weight: {weight.shape} (both dims % 128 == 0). "
+                             f"All tensor dimensions must be divisible by 128 for DeepGEMM operations.")
 
         if not use_deepgemm:
             raise RuntimeError("DeepGEMM is disabled but LayerNormLinearDeepGemm requires DeepGEMM")

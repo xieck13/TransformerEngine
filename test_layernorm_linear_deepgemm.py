@@ -159,9 +159,9 @@ def test_tensor_shapes():
     print("\n🔧 Testing different tensor shapes...")
 
     shapes = [
-        (4, 8, 128),     # Small
-        (8, 16, 256),    # Medium
-        (16, 32, 512),   # Large
+        (8, 16, 256),    # Medium - meets DeepGEMM constraints (128*2 = 256 batch*seq)
+        (16, 32, 512),   # Large - meets DeepGEMM constraints
+        (32, 16, 256),   # Alternative that meets constraints (32*16 = 512 batch*seq)
     ]
 
     for batch, seq, feat in shapes:
@@ -185,6 +185,8 @@ def test_tensor_shapes():
 
         except Exception as e:
             print(f"     ❌ Failed: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 if __name__ == "__main__":
