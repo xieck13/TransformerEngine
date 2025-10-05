@@ -166,7 +166,10 @@ class _LinearDeepGemmFunction(torch.autograd.Function):
                 if main_grad is not None and main_grad.requires_grad:
                     main_grad = main_grad.detach()
 
-            # Convert input to FP8 for wgrad - use columnwise like B tensor in forward pass
+            # Convert input to FP8 for wgrad - transpose it for NT layout
+            # For NT layout: A @ B.T, so if we want grad_output.T @ input,
+            # then input should be transposed to get the right layout
+            input_transposed = input_tensor.t().contiguous()
             input_quantizer = FP8DeepGemmQuantizer(
                 TE_DType.kFloat8E4M3,
                 rowwise=True,
@@ -174,9 +177,9 @@ class _LinearDeepGemmFunction(torch.autograd.Function):
                 use_deepgemm_layout=True,
             )
             input_fp8 = input_quantizer.make_empty(
-                input_tensor.shape, dtype=input_tensor.dtype, device=input_tensor.device
+                input_transposed.shape, dtype=input_transposed.dtype, device=input_transposed.device
             )
-            input_quantizer.update_quantized(input_tensor, input_fp8)
+            input_quantizer.update_quantized(input_transposed, input_fp8)
 
             # Convert grad_output to FP8 for wgrad - transpose it for NT layout
             grad_output_quantizer = FP8DeepGemmQuantizer(
@@ -197,7 +200,10 @@ class _LinearDeepGemmFunction(torch.autograd.Function):
 
             # Create output tensor for wgrad
             if accumulate_into_main_grad and main_grad is not None:
-                grad_weight_out = main_grad
+                # For main_grad accumulation, use bfloat16 output and handle fp32 accumulation in software
+                grad_weight_out = torch.empty(
+                    weight_tensor.shape, dtype=ctx.dtype, device=weight_tensor.device  # Use ctx.dtype (bfloat16)
+                )
                 use_accumulation = True
             else:
                 grad_weight_out = torch.empty(
@@ -206,10 +212,10 @@ class _LinearDeepGemmFunction(torch.autograd.Function):
                 use_accumulation = False
 
             # wgrad: grad_weight = grad_output.T @ input (NT layout)
-            # grad_output.T: [out_features, batch] @ input: [batch, in_features] -> [out_features, in_features]
-            # CRITICAL: Use 1D1D kernel when possible by setting c=output for accumulation
+            # For NT layout: A @ B.T where A=grad_output.T, B.T=input, so B=input.T
+            # grad_output.T: [out_features, batch] @ input.T: [batch, in_features] -> [out_features, in_features]
 
-            print(f"DEBUG: wgrad dimensions - grad_output: {grad_output.shape} -> transposed: {grad_output_transposed.shape}, input: {input_tensor.shape}, expected output: {weight_tensor.shape}")
+            print(f"DEBUG: wgrad dimensions - grad_output: {grad_output.shape} -> transposed: {grad_output_transposed.shape}, input: {input_tensor.shape} -> transposed: {input_transposed.shape}, expected output: {weight_tensor.shape}")
             print(f"DEBUG: grad_output_fp8.rowwise_data: {grad_output_fp8.rowwise_data.shape}")
             print(f"DEBUG: input_fp8.columnwise_data: {input_fp8.columnwise_data.shape}")
             print(f"DEBUG: grad_weight_out: {grad_weight_out.shape}")
@@ -223,7 +229,9 @@ class _LinearDeepGemmFunction(torch.autograd.Function):
             )
 
             if use_accumulation:
-                print(f"DEBUG: Successfully used DeepGEMM fp8_gemm_nt for wgrad with fp32 accumulation (1D1D kernel)")
+                # Accumulate into main_grad in fp32 for precision
+                main_grad.add_(grad_weight_out.to(torch.float32))
+                print(f"DEBUG: Successfully used DeepGEMM fp8_gemm_nt for wgrad with fp32 main_grad accumulation")
                 grad_weight = None  # Don't return grad_weight when accumulating into main_grad
             else:
                 print(f"DEBUG: Successfully used DeepGEMM fp8_gemm_nt for wgrad")
