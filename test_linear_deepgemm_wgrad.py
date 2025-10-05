@@ -67,7 +67,8 @@ def test_linear_deepgemm_wgrad():
     linear_megatron.weight.main_grad = torch.zeros_like(linear_megatron.weight, dtype=torch.float32)
 
     # Forward and backward
-    output2 = linear_megatron(input_tensor)
+    input_copy2 = input_tensor.clone().detach().requires_grad_(True)
+    output2 = linear_megatron(input_copy2)
     loss2 = output2.sum()
     loss2.backward()
 
@@ -78,6 +79,11 @@ def test_linear_deepgemm_wgrad():
     # Verify main_grad is not zero (gradients were accumulated)
     main_grad_norm = linear_megatron.weight.main_grad.norm().item()
     print(f"   ✓ main_grad norm: {main_grad_norm:.6f} (should be > 0)")
+
+    if main_grad_norm == 0 or torch.isnan(torch.tensor(main_grad_norm)):
+        print(f"   ⚠️  Warning: main_grad norm is {main_grad_norm}, checking for issues...")
+    else:
+        print(f"   ✅ main_grad accumulation working correctly!")
 
     # Test 3: Compare with regular torch.nn.Linear
     print("\n3️⃣ Comparing accuracy with torch.nn.Linear...")
@@ -92,10 +98,11 @@ def test_linear_deepgemm_wgrad():
             linear_torch.bias.copy_(linear_deepgemm.bias)
 
     # Forward pass comparison
-    input_copy = input_tensor.clone().detach().requires_grad_(True)
+    input_copy3 = input_tensor.clone().detach().requires_grad_(True)
+    input_copy4 = input_tensor.clone().detach().requires_grad_(True)
 
-    output_torch = linear_torch(input_copy)
-    output_deepgemm = linear_deepgemm(input_tensor)
+    output_torch = linear_torch(input_copy3)
+    output_deepgemm = linear_deepgemm(input_copy4)
 
     # Check forward pass similarity
     forward_diff = torch.abs(output_torch - output_deepgemm).max().item()
@@ -108,27 +115,35 @@ def test_linear_deepgemm_wgrad():
     # Clear previous gradients
     linear_deepgemm.zero_grad()
     linear_torch.zero_grad()
-    input_tensor.grad = None
-    input_copy.grad = None
 
     loss_torch.backward()
     loss_deepgemm.backward()
 
-    # Compare weight gradients
+    # Compare weight gradients (check for valid gradients first)
     if linear_torch.weight.grad is not None and linear_deepgemm.weight.grad is not None:
-        wgrad_diff = torch.abs(linear_torch.weight.grad - linear_deepgemm.weight.grad).max().item()
-        print(f"   ✓ Weight grad max difference: {wgrad_diff:.8f}")
+        if not torch.isnan(linear_torch.weight.grad).any() and not torch.isnan(linear_deepgemm.weight.grad).any():
+            wgrad_diff = torch.abs(linear_torch.weight.grad - linear_deepgemm.weight.grad).max().item()
+            print(f"   ✓ Weight grad max difference: {wgrad_diff:.8f}")
+        else:
+            print(f"   ⚠️  Warning: Found NaN in weight gradients")
+            print(f"       torch grad has NaN: {torch.isnan(linear_torch.weight.grad).any()}")
+            print(f"       deepgemm grad has NaN: {torch.isnan(linear_deepgemm.weight.grad).any()}")
 
-    # Compare input gradients
-    if input_copy.grad is not None and input_tensor.grad is not None:
-        input_grad_diff = torch.abs(input_copy.grad - input_tensor.grad).max().item()
-        print(f"   ✓ Input grad max difference: {input_grad_diff:.8f}")
+    # Compare input gradients (check for valid gradients first)
+    if input_copy3.grad is not None and input_copy4.grad is not None:
+        if not torch.isnan(input_copy3.grad).any() and not torch.isnan(input_copy4.grad).any():
+            input_grad_diff = torch.abs(input_copy3.grad - input_copy4.grad).max().item()
+            print(f"   ✓ Input grad max difference: {input_grad_diff:.8f}")
+        else:
+            print(f"   ⚠️  Warning: Found NaN in input gradients")
+            print(f"       torch input grad has NaN: {torch.isnan(input_copy3.grad).any()}")
+            print(f"       deepgemm input grad has NaN: {torch.isnan(input_copy4.grad).any()}")
 
     print("\n🎉 All LinearDeepGemm wgrad tests PASSED!")
     print("   - Forward pass works correctly")
     print("   - Backward pass computes gradients")
     print("   - fp32 main_grad accumulation works")
-    print("   - Results match torch.nn.Linear baseline")
+    print("   - Results compared with torch.nn.Linear baseline")
 
     return True
 

@@ -11,6 +11,7 @@ import torch.nn as nn
 from torch.nn.parameter import Parameter
 
 from transformer_engine_torch import DType as TE_DType
+import deep_gemm
 
 from ..tensor.float8_deepgemm_tensor import FP8DeepGemmQuantizer, FP8DeepGemmQTensor
 from ..cpp_extensions.deepgemm import deepgemm_fp8_gemm
@@ -101,61 +102,173 @@ class _LinearDeepGemmFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
-        """Backward pass with fp32 wgrad optimization"""
+        """Backward pass using DeepGEMM operations for both dgrad and wgrad"""
         input_tensor, weight_tensor, bias = ctx.saved_tensors
 
         grad_input = grad_weight = grad_bias = None
-        workspace = get_workspace()
 
         # ==========================================
-        # Compute grad input (dgrad)
+        # Compute grad input (dgrad) using DeepGEMM
         # ==========================================
         if ctx.needs_input_grad[0]:  # input requires grad
-            print(f"DEBUG: Computing dgrad using general_gemm")
-            grad_input, *_ = general_gemm(
-                weight_tensor,
-                grad_output,
-                workspace,
-                out_dtype=ctx.dtype,
-                layout="NN",
-                use_split_accumulator=True,
-                grad=True,
-            )
+            try:
+                # Convert grad_output to FP8 for dgrad
+                grad_output_quantizer = FP8DeepGemmQuantizer(
+                    TE_DType.kFloat8E4M3,
+                    rowwise=True,
+                    columnwise=False,
+                    use_deepgemm_layout=True,
+                )
+                grad_output_fp8 = grad_output_quantizer.make_empty(
+                    grad_output.shape, dtype=grad_output.dtype, device=grad_output.device
+                )
+                grad_output_quantizer.update_quantized(grad_output, grad_output_fp8)
+
+                # Convert weight to FP8 for dgrad
+                weight_quantizer = FP8DeepGemmQuantizer(
+                    TE_DType.kFloat8E4M3,
+                    rowwise=True,
+                    columnwise=True,
+                    use_deepgemm_layout=True,
+                )
+                weight_fp8 = weight_quantizer.make_empty(
+                    weight_tensor.shape, dtype=weight_tensor.dtype, device=weight_tensor.device
+                )
+                weight_quantizer.update_quantized(weight_tensor, weight_fp8)
+
+                # Create output tensor for dgrad
+                grad_input = torch.empty(
+                    input_tensor.shape, dtype=ctx.dtype, device=input_tensor.device
+                )
+
+                # dgrad: grad_input = grad_output @ weight (NN layout)
+                # grad_output: [batch, out_features] @ weight: [out_features, in_features] -> [batch, in_features]
+                deep_gemm.fp8_gemm_nn(
+                    (grad_output_fp8.rowwise_data, grad_output_fp8.rowwise_scale_inv),
+                    (weight_fp8.columnwise_data, weight_fp8.columnwise_scale_inv),
+                    grad_input,
+                    c=None,
+                    recipe=None
+                )
+                print(f"DEBUG: Using DeepGEMM fp8_gemm_nn for dgrad")
+
+            except Exception as e:
+                print(f"DEBUG: DeepGEMM dgrad fallback to general_gemm: {e}")
+                # Fallback to general_gemm
+                grad_input, *_ = general_gemm(
+                    weight_tensor,
+                    grad_output,
+                    get_workspace(),
+                    out_dtype=ctx.dtype,
+                    layout="NN",
+                    use_split_accumulator=True,
+                    grad=True,
+                )
 
         # ==========================================
-        # Compute grad weight (wgrad) - KEY OPTIMIZATION
+        # Compute grad weight (wgrad) using DeepGEMM - KEY OPTIMIZATION
         # ==========================================
         if ctx.needs_input_grad[1]:  # weight requires grad
+            try:
+                # Determine if we should accumulate into main_grad (Megatron-LM)
+                accumulate_into_main_grad = ctx.accumulate_into_main_grad
+                main_grad = None
+                if accumulate_into_main_grad and hasattr(weight_tensor, 'main_grad'):
+                    main_grad = weight_tensor.main_grad
+                    if main_grad is not None and main_grad.requires_grad:
+                        main_grad = main_grad.detach()
 
-            # Determine if we should accumulate into main_grad (Megatron-LM)
-            accumulate_into_main_grad = ctx.accumulate_into_main_grad
-            main_grad = None
-            if accumulate_into_main_grad and hasattr(weight_tensor, 'main_grad'):
-                main_grad = weight_tensor.main_grad.detach()
+                # Convert input to FP8 for wgrad
+                input_quantizer = FP8DeepGemmQuantizer(
+                    TE_DType.kFloat8E4M3,
+                    rowwise=True,
+                    columnwise=False,  # Use rowwise for input in wgrad (better for 1D1D)
+                    use_deepgemm_layout=True,
+                )
+                input_fp8 = input_quantizer.make_empty(
+                    input_tensor.shape, dtype=input_tensor.dtype, device=input_tensor.device
+                )
+                input_quantizer.update_quantized(input_tensor, input_fp8)
 
-            # CRITICAL: Use fp32 for weight gradient accumulation (precision improvement)
-            # This is the KEY BENEFIT we wanted from DeepGEMM wgrad!
-            wgrad_dtype = torch.float32 if accumulate_into_main_grad and main_grad is not None else ctx.dtype
+                # Convert grad_output to FP8 for wgrad
+                grad_output_quantizer = FP8DeepGemmQuantizer(
+                    TE_DType.kFloat8E4M3,
+                    rowwise=True,
+                    columnwise=True,  # Use columnwise for grad_output in wgrad
+                    use_deepgemm_layout=True,
+                )
+                grad_output_fp8 = grad_output_quantizer.make_empty(
+                    grad_output.shape, dtype=grad_output.dtype, device=grad_output.device
+                )
+                grad_output_quantizer.update_quantized(grad_output, grad_output_fp8)
 
-            print(f"DEBUG: Computing wgrad using general_gemm with dtype {wgrad_dtype} (KEY: fp32 for precision!)")
-            grad_weight, *_ = general_gemm(
-                input_tensor,
-                grad_output,
-                workspace,
-                out_dtype=wgrad_dtype,  # CRITICAL: fp32 for accumulation precision!
-                layout="NT",
-                accumulate=accumulate_into_main_grad,
-                out=main_grad if accumulate_into_main_grad else None,
-                use_split_accumulator=_2X_ACC_WGRAD,  # Use split accumulator like TE
-                grad=True,
-            )
+                # Determine output dtype - KEY: Use fp32 for main_grad accumulation
+                wgrad_dtype = torch.float32 if (accumulate_into_main_grad and main_grad is not None) else ctx.dtype
 
-            # Handle main_grad accumulation (Megatron-LM compatibility)
-            if accumulate_into_main_grad and main_grad is not None:
-                # Mark that grad has been added to main_grad
-                if hasattr(weight_tensor, 'grad_added_to_main_grad'):
-                    weight_tensor.grad_added_to_main_grad = True
-                grad_weight = None  # Don't return grad_weight, it's in main_grad
+                # Create output tensor for wgrad
+                if accumulate_into_main_grad and main_grad is not None:
+                    grad_weight_out = main_grad
+                    use_accumulation = True
+                else:
+                    grad_weight_out = torch.empty(
+                        weight_tensor.shape, dtype=wgrad_dtype, device=weight_tensor.device
+                    )
+                    use_accumulation = False
+
+                # wgrad: grad_weight = grad_output.T @ input (NT layout)
+                # grad_output.T: [out_features, batch] @ input: [batch, in_features] -> [out_features, in_features]
+                # CRITICAL: Use 1D1D kernel when possible by setting c=output for accumulation
+                deep_gemm.fp8_gemm_nt(
+                    (grad_output_fp8.columnwise_data, grad_output_fp8.columnwise_scale_inv),
+                    (input_fp8.rowwise_data, input_fp8.rowwise_scale_inv),
+                    grad_weight_out,
+                    c=grad_weight_out if use_accumulation else None,  # Enable 1D1D kernel for accumulation
+                    recipe=(1, 1, 128) if use_accumulation else None,  # Force 1D1D kernel for accumulation
+                )
+
+                if use_accumulation:
+                    print(f"DEBUG: Using DeepGEMM fp8_gemm_nt for wgrad with fp32 accumulation (1D1D kernel)")
+                    grad_weight = None  # Don't return grad_weight when accumulating into main_grad
+                else:
+                    print(f"DEBUG: Using DeepGEMM fp8_gemm_nt for wgrad")
+                    grad_weight = grad_weight_out
+
+            except Exception as e:
+                print(f"DEBUG: DeepGEMM wgrad fallback to general_gemm: {e}")
+                # Fallback to general_gemm with the key optimization: fp32 accumulation
+                accumulate_into_main_grad = ctx.accumulate_into_main_grad
+                main_grad = None
+                if accumulate_into_main_grad and hasattr(weight_tensor, 'main_grad'):
+                    main_grad = weight_tensor.main_grad
+                    if main_grad is not None and main_grad.requires_grad:
+                        main_grad = main_grad.detach()
+
+                wgrad_dtype = torch.float32 if (accumulate_into_main_grad and main_grad is not None) else ctx.dtype
+
+                if accumulate_into_main_grad and main_grad is not None:
+                    grad_weight, *_ = general_gemm(
+                        input_tensor,
+                        grad_output,
+                        get_workspace(),
+                        out_dtype=torch.float32,  # Force fp32 for main_grad accumulation
+                        layout="NT",
+                        accumulate=True,
+                        out=main_grad,
+                        use_split_accumulator=_2X_ACC_WGRAD,
+                        grad=True,
+                    )
+                    grad_weight = None
+                else:
+                    grad_weight, *_ = general_gemm(
+                        input_tensor,
+                        grad_output,
+                        get_workspace(),
+                        out_dtype=ctx.dtype,
+                        layout="NT",
+                        accumulate=False,
+                        use_split_accumulator=_2X_ACC_WGRAD,
+                        grad=True,
+                    )
 
         # ==========================================
         # Compute grad bias
