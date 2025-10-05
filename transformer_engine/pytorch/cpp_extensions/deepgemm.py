@@ -214,16 +214,16 @@ def deepgemm_fp8_gemm(
 
     try:
         # Choose the correct recipe based on operation type
-        # Recipe format: (dim1, dim2, dim3) where dim2 controls kernel selection:
-        # - dim2 == 1: 1D1D kernel (supports accumulation, requires float32, c!=None)
-        # - dim2 != 1: 1D2D kernel (no accumulation, requires bfloat16, c=None)
+        # Based on DeepGEMM test pattern:
+        # - recipe = (1, 1, 128) if 1D1D kernel and accumulate, else None
+        # - DeepGEMM selects kernel type based on: c parameter + recipe parameter + tensor dtypes
         if needs_accumulation_in_kernel:
             # Use 1D1D kernel for accumulation operations
             recipe = (1, 1, 128)
             print(f"DEBUG: Selected 1D1D recipe {recipe}, c_tensor={c_tensor is not None}")
         else:
             # Use 1D2D kernel for simple GEMM operations
-            recipe = (1, 128, 128)
+            recipe = None  # This is the key - 1D2D uses recipe=None
             print(f"DEBUG: Selected 1D2D recipe {recipe}, c_tensor={c_tensor is not None}")
 
         # Call appropriate DeepGEMM kernel using the correct (data, scales) tuple format
