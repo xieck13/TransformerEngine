@@ -111,164 +111,123 @@ class _LinearDeepGemmFunction(torch.autograd.Function):
         # Compute grad input (dgrad) using DeepGEMM
         # ==========================================
         if ctx.needs_input_grad[0]:  # input requires grad
-            try:
-                # Convert grad_output to FP8 for dgrad
-                grad_output_quantizer = FP8DeepGemmQuantizer(
-                    TE_DType.kFloat8E4M3,
-                    rowwise=True,
-                    columnwise=False,
-                    use_deepgemm_layout=True,
-                )
-                grad_output_fp8 = grad_output_quantizer.make_empty(
-                    grad_output.shape, dtype=grad_output.dtype, device=grad_output.device
-                )
-                grad_output_quantizer.update_quantized(grad_output, grad_output_fp8)
+            # Convert grad_output to FP8 for dgrad
+            grad_output_quantizer = FP8DeepGemmQuantizer(
+                TE_DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=False,
+                use_deepgemm_layout=True,
+            )
+            grad_output_fp8 = grad_output_quantizer.make_empty(
+                grad_output.shape, dtype=grad_output.dtype, device=grad_output.device
+            )
+            grad_output_quantizer.update_quantized(grad_output, grad_output_fp8)
 
-                # Convert weight to FP8 for dgrad
-                weight_quantizer = FP8DeepGemmQuantizer(
-                    TE_DType.kFloat8E4M3,
-                    rowwise=True,
-                    columnwise=True,
-                    use_deepgemm_layout=True,
-                )
-                weight_fp8 = weight_quantizer.make_empty(
-                    weight_tensor.shape, dtype=weight_tensor.dtype, device=weight_tensor.device
-                )
-                weight_quantizer.update_quantized(weight_tensor, weight_fp8)
+            # Convert weight to FP8 for dgrad - transpose weight for NT layout
+            weight_quantizer = FP8DeepGemmQuantizer(
+                TE_DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=True,
+                use_deepgemm_layout=True,
+            )
+            # Transpose weight to use NT layout instead of NN layout
+            weight_transposed = weight_tensor.t().contiguous()
+            weight_fp8 = weight_quantizer.make_empty(
+                weight_transposed.shape, dtype=weight_transposed.dtype, device=weight_transposed.device
+            )
+            weight_quantizer.update_quantized(weight_transposed, weight_fp8)
 
-                # Create output tensor for dgrad
-                grad_input = torch.empty(
-                    input_tensor.shape, dtype=ctx.dtype, device=input_tensor.device
-                )
+            # Create output tensor for dgrad
+            grad_input = torch.empty(
+                input_tensor.shape, dtype=ctx.dtype, device=input_tensor.device
+            )
 
-                # dgrad: grad_input = grad_output @ weight (NN layout)
-                # grad_output: [batch, out_features] @ weight: [out_features, in_features] -> [batch, in_features]
-                deep_gemm.fp8_gemm_nn(
-                    (grad_output_fp8.rowwise_data, grad_output_fp8.rowwise_scale_inv),
-                    (weight_fp8.columnwise_data, weight_fp8.columnwise_scale_inv),
-                    grad_input,
-                    c=None,
-                    recipe=None
-                )
-                print(f"DEBUG: Using DeepGEMM fp8_gemm_nn for dgrad")
-
-            except Exception as e:
-                print(f"DEBUG: DeepGEMM dgrad fallback to general_gemm: {e}")
-                # Fallback to general_gemm
-                grad_input, *_ = general_gemm(
-                    weight_tensor,
-                    grad_output,
-                    get_workspace(),
-                    out_dtype=ctx.dtype,
-                    layout="NN",
-                    use_split_accumulator=True,
-                    grad=True,
-                )
+            # dgrad: grad_input = grad_output @ weight (NN layout)
+            # Restructure as: grad_input = grad_output @ weight_transposed.T (NT layout)
+            # grad_output: [batch, out_features] @ weight_transposed.T: [in_features, out_features] -> [batch, in_features]
+            deep_gemm.fp8_gemm_nt(
+                (grad_output_fp8.rowwise_data, grad_output_fp8.rowwise_scale_inv),
+                (weight_fp8.columnwise_data, weight_fp8.columnwise_scale_inv),  # Using NT layout instead of NN
+                grad_input,
+                c=None,
+                recipe=None
+            )
+            print(f"DEBUG: Successfully used DeepGEMM fp8_gemm_nt for dgrad (weight transposed)")
 
         # ==========================================
         # Compute grad weight (wgrad) using DeepGEMM - KEY OPTIMIZATION
         # ==========================================
         if ctx.needs_input_grad[1]:  # weight requires grad
-            try:
-                # Determine if we should accumulate into main_grad (Megatron-LM)
-                accumulate_into_main_grad = ctx.accumulate_into_main_grad
-                main_grad = None
-                if accumulate_into_main_grad and hasattr(weight_tensor, 'main_grad'):
-                    main_grad = weight_tensor.main_grad
-                    if main_grad is not None and main_grad.requires_grad:
-                        main_grad = main_grad.detach()
+            # Determine if we should accumulate into main_grad (Megatron-LM)
+            accumulate_into_main_grad = ctx.accumulate_into_main_grad
+            main_grad = None
+            if accumulate_into_main_grad and hasattr(weight_tensor, 'main_grad'):
+                main_grad = weight_tensor.main_grad
+                if main_grad is not None and main_grad.requires_grad:
+                    main_grad = main_grad.detach()
 
-                # Convert input to FP8 for wgrad
-                input_quantizer = FP8DeepGemmQuantizer(
-                    TE_DType.kFloat8E4M3,
-                    rowwise=True,
-                    columnwise=False,  # Use rowwise for input in wgrad (better for 1D1D)
-                    use_deepgemm_layout=True,
+            # Convert input to FP8 for wgrad - use columnwise like B tensor in forward pass
+            input_quantizer = FP8DeepGemmQuantizer(
+                TE_DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=True,  # Use columnwise like B tensor in forward pass
+                use_deepgemm_layout=True,
+            )
+            input_fp8 = input_quantizer.make_empty(
+                input_tensor.shape, dtype=input_tensor.dtype, device=input_tensor.device
+            )
+            input_quantizer.update_quantized(input_tensor, input_fp8)
+
+            # Convert grad_output to FP8 for wgrad - transpose it for NT layout
+            grad_output_quantizer = FP8DeepGemmQuantizer(
+                TE_DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=False,  # Use rowwise like A tensor in forward pass
+                use_deepgemm_layout=True,
+            )
+            # Transpose grad_output for wgrad computation: grad_output.T @ input
+            grad_output_transposed = grad_output.t().contiguous()
+            grad_output_fp8 = grad_output_quantizer.make_empty(
+                grad_output_transposed.shape, dtype=grad_output_transposed.dtype, device=grad_output_transposed.device
+            )
+            grad_output_quantizer.update_quantized(grad_output_transposed, grad_output_fp8)
+
+            # Determine output dtype - KEY: Use fp32 for main_grad accumulation
+            wgrad_dtype = torch.float32 if (accumulate_into_main_grad and main_grad is not None) else ctx.dtype
+
+            # Create output tensor for wgrad
+            if accumulate_into_main_grad and main_grad is not None:
+                grad_weight_out = main_grad
+                use_accumulation = True
+            else:
+                grad_weight_out = torch.empty(
+                    weight_tensor.shape, dtype=wgrad_dtype, device=weight_tensor.device
                 )
-                input_fp8 = input_quantizer.make_empty(
-                    input_tensor.shape, dtype=input_tensor.dtype, device=input_tensor.device
-                )
-                input_quantizer.update_quantized(input_tensor, input_fp8)
+                use_accumulation = False
 
-                # Convert grad_output to FP8 for wgrad
-                grad_output_quantizer = FP8DeepGemmQuantizer(
-                    TE_DType.kFloat8E4M3,
-                    rowwise=True,
-                    columnwise=True,  # Use columnwise for grad_output in wgrad
-                    use_deepgemm_layout=True,
-                )
-                grad_output_fp8 = grad_output_quantizer.make_empty(
-                    grad_output.shape, dtype=grad_output.dtype, device=grad_output.device
-                )
-                grad_output_quantizer.update_quantized(grad_output, grad_output_fp8)
+            # wgrad: grad_weight = grad_output.T @ input (NT layout)
+            # grad_output.T: [out_features, batch] @ input: [batch, in_features] -> [out_features, in_features]
+            # CRITICAL: Use 1D1D kernel when possible by setting c=output for accumulation
 
-                # Determine output dtype - KEY: Use fp32 for main_grad accumulation
-                wgrad_dtype = torch.float32 if (accumulate_into_main_grad and main_grad is not None) else ctx.dtype
+            print(f"DEBUG: wgrad dimensions - grad_output: {grad_output.shape} -> transposed: {grad_output_transposed.shape}, input: {input_tensor.shape}, expected output: {weight_tensor.shape}")
+            print(f"DEBUG: grad_output_fp8.rowwise_data: {grad_output_fp8.rowwise_data.shape}")
+            print(f"DEBUG: input_fp8.columnwise_data: {input_fp8.columnwise_data.shape}")
+            print(f"DEBUG: grad_weight_out: {grad_weight_out.shape}")
 
-                # Create output tensor for wgrad
-                if accumulate_into_main_grad and main_grad is not None:
-                    grad_weight_out = main_grad
-                    use_accumulation = True
-                else:
-                    grad_weight_out = torch.empty(
-                        weight_tensor.shape, dtype=wgrad_dtype, device=weight_tensor.device
-                    )
-                    use_accumulation = False
+            deep_gemm.fp8_gemm_nt(
+                (grad_output_fp8.rowwise_data, grad_output_fp8.rowwise_scale_inv),  # Use rowwise_data
+                (input_fp8.columnwise_data, input_fp8.columnwise_scale_inv),  # Use columnwise_data like forward pass
+                grad_weight_out,
+                c=None,  # Start with basic case, no accumulation
+                recipe=None  # Start with basic case, no forced recipe
+            )
 
-                # wgrad: grad_weight = grad_output.T @ input (NT layout)
-                # grad_output.T: [out_features, batch] @ input: [batch, in_features] -> [out_features, in_features]
-                # CRITICAL: Use 1D1D kernel when possible by setting c=output for accumulation
-                deep_gemm.fp8_gemm_nt(
-                    (grad_output_fp8.columnwise_data, grad_output_fp8.columnwise_scale_inv),
-                    (input_fp8.rowwise_data, input_fp8.rowwise_scale_inv),
-                    grad_weight_out,
-                    c=grad_weight_out if use_accumulation else None,  # Enable 1D1D kernel for accumulation
-                    recipe=(1, 1, 128) if use_accumulation else None,  # Force 1D1D kernel for accumulation
-                )
-
-                if use_accumulation:
-                    print(f"DEBUG: Using DeepGEMM fp8_gemm_nt for wgrad with fp32 accumulation (1D1D kernel)")
-                    grad_weight = None  # Don't return grad_weight when accumulating into main_grad
-                else:
-                    print(f"DEBUG: Using DeepGEMM fp8_gemm_nt for wgrad")
-                    grad_weight = grad_weight_out
-
-            except Exception as e:
-                print(f"DEBUG: DeepGEMM wgrad fallback to general_gemm: {e}")
-                # Fallback to general_gemm with the key optimization: fp32 accumulation
-                accumulate_into_main_grad = ctx.accumulate_into_main_grad
-                main_grad = None
-                if accumulate_into_main_grad and hasattr(weight_tensor, 'main_grad'):
-                    main_grad = weight_tensor.main_grad
-                    if main_grad is not None and main_grad.requires_grad:
-                        main_grad = main_grad.detach()
-
-                wgrad_dtype = torch.float32 if (accumulate_into_main_grad and main_grad is not None) else ctx.dtype
-
-                if accumulate_into_main_grad and main_grad is not None:
-                    grad_weight, *_ = general_gemm(
-                        input_tensor,
-                        grad_output,
-                        get_workspace(),
-                        out_dtype=torch.float32,  # Force fp32 for main_grad accumulation
-                        layout="NT",
-                        accumulate=True,
-                        out=main_grad,
-                        use_split_accumulator=_2X_ACC_WGRAD,
-                        grad=True,
-                    )
-                    grad_weight = None
-                else:
-                    grad_weight, *_ = general_gemm(
-                        input_tensor,
-                        grad_output,
-                        get_workspace(),
-                        out_dtype=ctx.dtype,
-                        layout="NT",
-                        accumulate=False,
-                        use_split_accumulator=_2X_ACC_WGRAD,
-                        grad=True,
-                    )
+            if use_accumulation:
+                print(f"DEBUG: Successfully used DeepGEMM fp8_gemm_nt for wgrad with fp32 accumulation (1D1D kernel)")
+                grad_weight = None  # Don't return grad_weight when accumulating into main_grad
+            else:
+                print(f"DEBUG: Successfully used DeepGEMM fp8_gemm_nt for wgrad")
+                grad_weight = grad_weight_out
 
         # ==========================================
         # Compute grad bias
