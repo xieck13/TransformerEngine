@@ -102,14 +102,14 @@ def test_deepgemm_integration():
                 {
                     "name": "Accumulation GEMM (accumulate only)",
                     "kwargs": {"layout": "nt", "accumulate": True},
-                    "expected_dtype": torch.float32,  # This should use 1D1D kernel
-                    "expected_kernel": "1D1D"
+                    "expected_dtype": torch.bfloat16,  # DeepGEMM only supports bfloat16 output
+                    "expected_kernel": "1D1D"  # Should use 1D1D kernel for accumulation with rowwise B
                 },
                 {
                     "name": "Accumulation GEMM (with bias + accumulate)",
                     "kwargs": {"layout": "nt", "bias": torch.randn(M, N, device=device, dtype=torch.bfloat16), "accumulate": True},
-                    "expected_dtype": torch.float32,  # This should use 1D1D kernel
-                    "expected_kernel": "1D1D"
+                    "expected_dtype": torch.bfloat16,  # DeepGEMM only supports bfloat16 output
+                    "expected_kernel": "1D1D"  # Should use 1D1D kernel for accumulation with rowwise B
                 },
                 {
                     "name": "NN Layout (no bias)",
@@ -208,7 +208,8 @@ def test_deepgemm_integration():
         if all_tests_passed:
             print("🎉 All DeepGEMM integration tests PASSED!")
             print("   - Forward GEMM works with correct dtype selection")
-            print("   - 1D1D/1D2D kernel selection works correctly")
+            print("   - 1D1D kernel for accumulation works correctly")
+            print("   - 1D2D kernel for forward operations works correctly")
             print("   - Bias handling works properly")
             print("   - Multiple layouts supported")
             return True

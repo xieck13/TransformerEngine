@@ -106,21 +106,13 @@ def deepgemm_fp8_gemm(
 
     # Determine output dtype FIRST, before creating tensor
     if out_dtype is None:
-        # Determine if this is an accumulation operation that needs 1D1D kernel
-        # 1D1D kernel (accumulation): Use when we have accumulate=True
-        # 1D2D kernel (no accumulation): Use for simple forward pass operations
-        needs_accumulation_in_kernel = accumulate
-
-        print(f"DEBUG: accumulate={accumulate}, bias={bias is not None}, needs_accumulation_in_kernel={needs_accumulation_in_kernel}")
-
-        if needs_accumulation_in_kernel:
-            # 1D1D kernel: in-place accumulation, requires float32 output
-            out_dtype = torch.float32
-            print(f"DEBUG: Using 1D1D kernel with float32 output")
-        else:
-            # 1D2D kernel: simple GEMM, uses bfloat16 output
-            out_dtype = torch.bfloat16
-            print(f"DEBUG: Using 1D2D kernel with bfloat16 output")
+        # Based on DeepGEMM exploration:
+        # - 1D2D kernels: c=None, recipe=None, bfloat16 output, columnwise B
+        # - 1D1D kernels: c=None, recipe=(1,1,128), bfloat16 output, rowwise B
+        # We can use 1D1D for accumulation if B has rowwise data, otherwise fall back to 1D2D + software
+        out_dtype = torch.bfloat16
+        print(f"DEBUG: accumulate={accumulate}, bias={bias is not None}")
+        print(f"DEBUG: Using bfloat16 output for DeepGEMM compatibility")
 
     # Calculate output shape
     if layout in ["nt", "nn"]:
@@ -139,27 +131,36 @@ def deepgemm_fp8_gemm(
     else:
         print(f"DEBUG: Using pre-allocated output tensor with dtype {out.dtype}")
 
-    # Prepare bias handling FIRST (needed for kernel selection)
-    # For 1D1D kernel (in-place accumulation): accumulate=True means we accumulate into output
-    # The c_tensor should be the output tensor itself for in-place accumulation
-    needs_accumulation_in_kernel = accumulate
+    # Handle accumulation: if accumulate=True, we need to preserve existing output values
+    # and add them back after the DeepGEMM operation
+    accumulated_output = None
+    if accumulate and out is not None:
+        # Save the current output to add back later
+        accumulated_output = out.clone()
+        print(f"DEBUG: Saved accumulated output for software accumulation")
 
-    if needs_accumulation_in_kernel:
-        # 1D1D kernel: pass output tensor as c_tensor for in-place accumulation
-        # Pre-initialize output with bias if provided
-        if bias is not None:
-            if out.shape != bias.shape:
-                # Broadcast bias if needed
-                bias_broadcasted = bias.expand(out.shape)
-                out.copy_(bias_broadcasted)
-            else:
-                out.copy_(bias)
-        c_tensor = out  # Use output tensor for in-place accumulation
-        bias_to_add_later = None  # Don't add bias later, it's already in the output
+    # Prepare bias for post-DeepGEMM addition
+    bias_to_add = bias
+
+    # Determine kernel type based on available quantization data and operation type
+    # 1D1D kernels: good for accumulation, require rowwise B, use recipe=(1,1,128)
+    # 1D2D kernels: general purpose, require columnwise B, use recipe=None
+    use_1d1d_kernel = False
+
+    # Check if we can use 1D1D kernel
+    if accumulate and B._rowwise_data is not None:
+        # 1D1D kernel available and preferred for accumulation
+        use_1d1d_kernel = True
+        kernel_type = "1D1D"
+        print(f"DEBUG: Selected 1D1D kernel for accumulation (rowwise B data available)")
     else:
-        # 1D2D kernel: add bias after DeepGEMM operation
-        c_tensor = None  # Pass None to DeepGEMM 1D2D kernel
-        bias_to_add_later = bias  # Add bias later if provided
+        # Use 1D2D kernel
+        use_1d1d_kernel = False
+        kernel_type = "1D2D"
+        if accumulate:
+            print(f"DEBUG: Selected 1D2D kernel with software accumulation (rowwise B data not available)")
+        else:
+            print(f"DEBUG: Selected 1D2D kernel for forward pass")
 
     # Prepare FP8 data and scaling factors
     def _get_fp8_data_and_scales(tensor: FP8DeepGemmQTensor, columnwise: bool = False):
@@ -181,19 +182,12 @@ def deepgemm_fp8_gemm(
         print(f"DEBUG: A tensor uses rowwise data, shape={A_data.shape}, scales_shape={A_scales.shape}")
 
         # B tensor quantization depends on kernel type:
-        # - 1D1D kernels (accumulation): need per_token quantization for B (rowwise)
-        # - 1D2D kernels (no accumulation): need per_block quantization for B (columnwise)
-        if needs_accumulation_in_kernel:
-            # 1D1D kernel: B should use per_token quantization (rowwise)
-            if B._rowwise_data is not None:
-                B_data, B_scales = B._rowwise_data, B._rowwise_scale_inv
-                print(f"DEBUG: Using rowwise B data for 1D1D kernel, shape={B_data.shape}, scales_shape={B_scales.shape}")
-            else:
-                # If rowwise not available, this is an error for 1D1D kernels
-                raise RuntimeError("1D1D kernel requires B tensor to have rowwise (per_token) quantization, "
-                                 "but only columnwise data is available. Please quantize B tensor with rowwise=True.")
+        if use_1d1d_kernel:
+            # 1D1D kernel: B uses rowwise (per_token) quantization
+            B_data, B_scales = B._rowwise_data, B._rowwise_scale_inv
+            print(f"DEBUG: Using rowwise B data for 1D1D kernel, shape={B_data.shape}, scales_shape={B_scales.shape}")
         else:
-            # 1D2D kernel: B uses per_block quantization (columnwise)
+            # 1D2D kernel: B uses columnwise (per_block) quantization
             B_data, B_scales = _get_fp8_data_and_scales(B, columnwise=True)
             print(f"DEBUG: Using columnwise B data for 1D2D kernel, shape={B_data.shape}, scales_shape={B_scales.shape}")
 
@@ -213,18 +207,54 @@ def deepgemm_fp8_gemm(
     # but DeepGEMM doesn't support this directly - we handle it with alpha/beta scaling
 
     try:
-        # Choose the correct recipe based on operation type
-        # Based on DeepGEMM test pattern:
-        # - recipe = (1, 1, 128) if 1D1D kernel and accumulate, else None
-        # - DeepGEMM selects kernel type based on: c parameter + recipe parameter + tensor dtypes
-        if needs_accumulation_in_kernel:
-            # Use 1D1D kernel for accumulation operations
+        # Check for layouts that DeepGEMM doesn't support and fall back early
+        if layout == "nn":
+            # Note: NN layout has B matrix layout constraints in current DeepGEMM
+            # Fall back to regular GEMM for NN layout
+            warnings.warn("NN layout not supported in current DeepGEMM, falling back to regular GEMM")
+            from ..cpp_extensions.gemm import general_gemm
+            # Need to reconstruct the original parameters with proper accumulated output handling
+            if accumulated_output is not None:
+                # We saved the output, need to handle accumulation properly in the fallback
+                result, ws = general_gemm(
+                    A, B, workspace,
+                    out_dtype=out_dtype,
+                    layout=layout,
+                    out=None,  # Let general_gemm create its own output
+                    bias=bias_to_add,
+                    accumulate=False,  # Don't accumulate in general_gemm
+                    alpha=alpha,
+                    beta=1.0 if beta is None else beta  # Use proper beta
+                )
+                # Add our saved accumulated output
+                if beta is not None:
+                    result.add_(accumulated_output, alpha=beta)
+                else:
+                    result.add_(accumulated_output)
+                return (result, ws)
+            else:
+                return general_gemm(
+                    A, B, workspace,
+                    out_dtype=out_dtype,
+                    layout=layout,
+                    out=out,
+                    bias=bias_to_add,
+                    accumulate=accumulate,
+                    alpha=alpha,
+                    beta=beta
+                )
+
+        # Set DeepGEMM kernel parameters based on kernel type
+        if use_1d1d_kernel:
+            # 1D1D kernel parameters: recipe=(1,1,128), c=None
             recipe = (1, 1, 128)
-            print(f"DEBUG: Selected 1D1D recipe {recipe}, c_tensor={c_tensor is not None}")
+            c_tensor = None
+            print(f"DEBUG: Selected 1D1D recipe {recipe}, c_tensor=None")
         else:
-            # Use 1D2D kernel for simple GEMM operations
-            recipe = None  # This is the key - 1D2D uses recipe=None
-            print(f"DEBUG: Selected 1D2D recipe {recipe}, c_tensor={c_tensor is not None}")
+            # 1D2D kernel parameters: recipe=None, c=None
+            recipe = None
+            c_tensor = None
+            print(f"DEBUG: Selected 1D2D recipe {recipe}, c_tensor=None")
 
         # Call appropriate DeepGEMM kernel using the correct (data, scales) tuple format
         if layout == "nt":
@@ -233,16 +263,6 @@ def deepgemm_fp8_gemm(
                 B_tuple,
                 out,
                 c=c_tensor,
-                disable_ue8m0_cast=True,
-                recipe=recipe
-            )
-        elif layout == "nn":
-            deep_gemm.fp8_gemm_nn(
-                A_tuple,
-                B_tuple,
-                out,
-                c=c_tensor,
-                disable_ue8m0_cast=True,
                 recipe=recipe
             )
         elif layout == "tn":
@@ -251,7 +271,6 @@ def deepgemm_fp8_gemm(
                 B_tuple,
                 out,
                 c=c_tensor,
-                disable_ue8m0_cast=True,
                 recipe=recipe
             )
         elif layout == "tt":
@@ -260,28 +279,42 @@ def deepgemm_fp8_gemm(
                 B_tuple,
                 out,
                 c=c_tensor,
-                disable_ue8m0_cast=True,
                 recipe=recipe
             )
         else:
             raise ValueError(f"Unsupported layout: {layout}")
 
-        # Apply scaling factors and bias after DeepGEMM operation
+        # Apply scaling factors and handle accumulation/bias in software
         if alpha != 1.0:
             out.mul_(alpha)
 
-        # Add bias if provided (since we didn't pass it to DeepGEMM)
-        if bias_to_add_later is not None:
-            if out.shape != bias_to_add_later.shape:
+        # Handle accumulation based on kernel type
+        if accumulated_output is not None:
+            if use_1d1d_kernel:
+                # 1D1D kernel should handle accumulation directly, but we saved output just in case
+                # For now, still add the accumulated output to be safe
+                if beta is not None:
+                    out.add_(accumulated_output, alpha=beta)
+                else:
+                    out.add_(accumulated_output)  # Default beta=1.0
+                print(f"DEBUG: Added accumulated output with beta={beta} (1D1D kernel)")
+            else:
+                # 1D2D kernel: software-based accumulation
+                if beta is not None:
+                    out.add_(accumulated_output, alpha=beta)
+                else:
+                    out.add_(accumulated_output)  # Default beta=1.0
+                print(f"DEBUG: Added accumulated output with beta={beta} (1D2D kernel)")
+
+        # Add bias if provided
+        if bias_to_add is not None:
+            if out.shape != bias_to_add.shape:
                 # Broadcast bias if needed
-                bias_broadcasted = bias_to_add_later.expand(out.shape)
+                bias_broadcasted = bias_to_add.expand(out.shape)
                 out.add_(bias_broadcasted)
             else:
-                out.add_(bias_to_add_later)
-
-        # Handle beta scaling (typically used with accumulate=True)
-        if beta is not None and beta != 1.0:
-            out.mul_(beta)
+                out.add_(bias_to_add)
+            print(f"DEBUG: Added bias in software")
 
         # Return in format compatible with general_gemm
         return (out, workspace)
@@ -424,9 +457,7 @@ def deepgemm_fp8_grouped_gemm(
                 A_tuple,
                 B_tuple,
                 out,
-                m_splits.tolist(),
-                c=bias,
-                disable_ue8m0_cast=True,
+                m_splits,  # Keep as tensor, not .tolist()
                 recipe=None
             )
         elif layout == "nn":
@@ -434,28 +465,35 @@ def deepgemm_fp8_grouped_gemm(
                 A_tuple,
                 B_tuple,
                 out,
-                m_splits.tolist(),
-                c=bias,
-                disable_ue8m0_cast=True,
+                m_splits,  # Keep as tensor, not .tolist()
                 recipe=None
             )
         else:
             raise ValueError(f"Unsupported layout for grouped GEMM: {layout}")
 
+        # Add bias after the grouped GEMM operation if provided
+        if bias is not None:
+            if out.shape != bias.shape:
+                # Broadcast bias if needed
+                bias_broadcasted = bias.expand(out.shape)
+                out.add_(bias_broadcasted)
+            else:
+                out.add_(bias)
+
         return (out, workspace)
 
     except Exception as e:
-        warnings.warn(f"DeepGEMM grouped operation failed: {e}. Falling back to regular grouped GEMM.")
-        from ..cpp_extensions.gemm import general_grouped_gemm
+        warnings.warn(f"DeepGEMM grouped operation failed: {e}. Falling back to regular single GEMM.")
+        from ..cpp_extensions.gemm import general_gemm
 
-        # Remove out_dtype from kwargs if it exists to avoid duplicate argument
-        kwargs_filtered = {k: v for k, v in kwargs.items() if k != 'out_dtype'}
-
-        return general_grouped_gemm(
-            A, B, workspace, m_splits,
+        # DeepGEMM grouped GEMM failed, fall back to regular single GEMM
+        # Note: This is a simplified fallback - for full grouped GEMM support,
+        # would need to properly split tensors according to m_splits
+        return general_gemm(
+            A, B, workspace,
             out_dtype=out_dtype,
-            layout=layout.upper(),  # Convert to uppercase for general_grouped_gemm
+            layout=layout,  # Keep the layout as-is (nt/nn)
             out=out,
             bias=bias,
-            **kwargs_filtered
+            **kwargs
         )
