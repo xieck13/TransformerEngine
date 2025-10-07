@@ -20,6 +20,7 @@ from .storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from .float8_tensor import Float8Tensor, Float8Quantizer, Float8CurrentScalingQuantizer
 from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantizer
+from .float8_deepgemm_tensor import FP8DeepGemmQTensor, FP8DeepGemmQuantizer
 from .nvfp4_tensor import NVFP4Tensor, NVFP4Quantizer
 from .utils import cast_master_weights_to_fp8, replace_raw_data
 
@@ -29,6 +30,7 @@ __all__ = [
     "Float8CurrentScalingQuantizer",
     "MXFP8Quantizer",
     "Float8BlockQuantizer",
+    "FP8DeepGemmQuantizer",
     "NVFP4Quantizer",
     "QuantizedTensorStorage",
     "Float8TensorStorage",
@@ -39,6 +41,7 @@ __all__ = [
     "Float8Tensor",
     "MXFP8Tensor",
     "Float8BlockwiseQTensor",
+    "FP8DeepGemmQTensor",
     "NVFP4Tensor",
     "prepare_for_saving",
     "restore_from_saved",
@@ -87,6 +90,7 @@ def get_all_tensor_types():
         MXFP8TensorStorage,
         Float8BlockwiseQTensor,
         Float8BlockwiseQTensorStorage,
+        FP8DeepGemmQTensor,
         NVFP4Tensor,
         NVFP4TensorStorage,
     ]

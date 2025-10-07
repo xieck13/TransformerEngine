@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir:*)",
+      "Bash(git clone:*)",
+      "Bash(find:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(python test_deepgemm_integration.py:*)",
+      "Bash(python:*)",
+      "Read(//usr/local/lib/python3.12/dist-packages/deep_gemm/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
